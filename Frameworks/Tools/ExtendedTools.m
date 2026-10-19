@@ -1,12 +1,25 @@
 /*
  * OCExtendedTools.m
- * LegacyPodClaw - Extended Tool Catalog Implementation
+ * LegacyPodClaw - Extended Tool Catalog Implementation (Security Enhanced)
+ *
+ * SECURITY FEATURES:
+ *   - Hardened bash execution with fork/exec
+ *   - Command validation against injection attacks
+ *   - Resource limits (CPU, memory, file size, processes)
+ *   - Timeout enforcement with SIGTERM/SIGKILL
+ *   - Cleaned environment to prevent env var injection
  */
 
 #import "ExtendedTools.h"
 #import <UIKit/UIKit.h>
 #import <sys/sysctl.h>
 #import <sys/mount.h>
+#import <sys/types.h>
+#import <sys/wait.h>
+#import <sys/resource.h>
+#import <sys/time.h>
+#import <signal.h>
+#import <unistd.h>
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 
@@ -30,45 +43,240 @@ static OCStore *_memoryStore = nil;
              error:nil];
 }
 
-#pragma mark - Bash
+#pragma mark - Bash (Hardened)
+
+/* SECURITY: Characters that could enable command injection */
+static NSCharacterSet *_dangerousChars = nil;
+
++ (void)initialize {
+    if (self == [OCExtendedTools class]) {
+        /* Initialize dangerous character set on first use */
+        _dangerousChars = [[NSCharacterSet characterSetWithCharactersInString:
+            @";|&`$(){}[]!\\*?<>~^#%\n\r"] retain];
+    }
+}
+
+/* SECURITY: Validate command for injection attempts */
++ (BOOL)_isCommandSafe:(NSString *)cmd error:(NSString **)error {
+    if (!cmd || [cmd length] == 0) {
+        if (error) *error = @"Empty command";
+        return NO;
+    }
+    
+    /* Check length */
+    if ([cmd length] > 4096) {
+        if (error) *error = @"Command too long (max 4096 chars)";
+        return NO;
+    }
+    
+    /* Check for shell metacharacters that could enable injection */
+    NSRange dangerousRange = [cmd rangeOfCharacterFromSet:_dangerousChars];
+    if (dangerousRange.location != NSNotFound) {
+        if (error) {
+            *error = [NSString stringWithFormat:
+                @"Command contains dangerous character at position %lu: '%@'",
+                (unsigned long)dangerousRange.location,
+                [cmd substringWithRange:NSMakeRange(dangerousRange.location, 1)]];
+        }
+        return NO;
+    }
+    
+    /* Check for common dangerous patterns */
+    NSString *lower = [cmd lowercaseString];
+    NSArray *dangerousPatterns = @[
+        @"eval", @"exec", @"source", @".", @"$(", @"${",
+        @"curl |", @"wget |", @"fetch |",
+        @">/dev", @"> /dev", @"2>/dev", @"2> /dev"
+    ];
+    
+    for (NSString *pattern in dangerousPatterns) {
+        if ([lower rangeOfString:pattern].location != NSNotFound) {
+            if (error) *error = [NSString stringWithFormat:@"Command contains dangerous pattern: %@", pattern];
+            return NO;
+        }
+    }
+    
+    return YES;
+}
+
+/* SECURITY: Execute command safely using fork/exec with resource limits */
++ (void)_executeCommandSafely:(NSString *)cmd 
+                     timeout:(NSTimeInterval)timeout
+                  completion:(void(^)(NSString *output, int exitCode))completion {
+    
+    /* Create pipe for output capture */
+    int stdoutPipe[2];
+    int stderrPipe[2];
+    if (pipe(stdoutPipe) < 0 || pipe(stderrPipe) < 0) {
+        completion(@"Failed to create pipes", -1);
+        return;
+    }
+    
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(stdoutPipe[0]); close(stdoutPipe[1]);
+        close(stderrPipe[0]); close(stderrPipe[1]);
+        completion(@"Fork failed", -1);
+        return;
+    }
+    
+    if (pid == 0) {
+        /* Child process */
+        
+        /* SECURITY: Resource limits to prevent DoS */
+        struct rlimit lim;
+        
+        /* Limit CPU time */
+        lim.rlim_cur = lim.rlim_max = (rlim_t)timeout;
+        setrlimit(RLIMIT_CPU, &lim);
+        
+        /* Limit memory */
+        lim.rlim_cur = lim.rlim_max = 64 * 1024 * 1024; /* 64MB */
+        setrlimit(RLIMIT_AS, &lim);
+        
+        /* Limit file size */
+        lim.rlim_cur = lim.rlim_max = 16 * 1024 * 1024; /* 16MB output */
+        setrlimit(RLIMIT_FSIZE, &lim);
+        
+        /* Limit number of processes */
+        lim.rlim_cur = lim.rlim_max = 10;
+        setrlimit(RLIMIT_NPROC, &lim);
+        
+        /* Redirect stdout/stderr to pipes */
+        dup2(stdoutPipe[1], STDOUT_FILENO);
+        dup2(stderrPipe[1], STDERR_FILENO);
+        
+        /* Close all pipe fds */
+        close(stdoutPipe[0]); close(stdoutPipe[1]);
+        close(stderrPipe[0]); close(stderrPipe[1]);
+        
+        /* SECURITY: Clear environment to prevent injection via env vars */
+        char *env[] = {
+            "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME=/var/mobile",
+            "USER=mobile",
+            "TERM=dumb",
+            NULL
+        };
+        
+        /* Execute via /bin/sh with -c (safer than direct exec for complex commands) */
+        /* Note: Command was already validated for dangerous chars */
+        char *args[] = { (char *)"sh", (char *)"-c", (char *)[cmd UTF8String], NULL };
+        execve("/bin/sh", args, env);
+        
+        /* execve failed */
+        _exit(127);
+    }
+    
+    /* Parent process */
+    close(stdoutPipe[1]);
+    close(stderrPipe[1]);
+    
+    /* Read output with timeout */
+    NSMutableString *output = [NSMutableString string];
+    char buf[1024];
+    ssize_t n;
+    
+    /* Use select for timeout */
+    fd_set readfds;
+    struct timeval tv;
+    tv.tv_sec = (long)timeout;
+    tv.tv_usec = 0;
+    
+    time_t startTime = time(NULL);
+    BOOL timedOut = NO;
+    
+    while (time(NULL) - startTime < (time_t)timeout) {
+        FD_ZERO(&readfds);
+        FD_SET(stdoutPipe[0], &readfds);
+        FD_SET(stderrPipe[0], &readfds);
+        
+        int maxfd = (stdoutPipe[0] > stderrPipe[0]) ? stdoutPipe[0] : stderrPipe[0];
+        int ret = select(maxfd + 1, &readfds, NULL, NULL, &tv);
+        
+        if (ret < 0) break;
+        if (ret == 0) {
+            /* Timeout */
+            timedOut = YES;
+            break;
+        }
+        
+        if (FD_ISSET(stdoutPipe[0], &readfds)) {
+            n = read(stdoutPipe[0], buf, sizeof(buf) - 1);
+            if (n > 0) {
+                buf[n] = '\0';
+                [output appendFormat:@"%s", buf];
+            }
+        }
+        
+        if (FD_ISSET(stderrPipe[0], &readfds)) {
+            n = read(stderrPipe[0], buf, sizeof(buf) - 1);
+            if (n > 0) {
+                buf[n] = '\0';
+                [output appendFormat:@"%s", buf];
+            }
+        }
+        
+        /* Cap output size */
+        if ([output length] > 16384) {
+            [output appendString:@"\n[Output truncated at 16KB]"];
+            break;
+        }
+    }
+    
+    close(stdoutPipe[0]);
+    close(stderrPipe[0]);
+    
+    /* Get exit status */
+    int status;
+    int exitCode = -1;
+    
+    if (timedOut) {
+        /* Kill child if timed out */
+        kill(pid, SIGTERM);
+        usleep(100000); /* 100ms grace period */
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+        exitCode = -2; /* Timeout indicator */
+        [output appendString:@"\n[Command timed out]"];
+    } else {
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status)) {
+            exitCode = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            exitCode = 128 + WTERMSIG(status);
+        }
+    }
+    
+    completion(output, exitCode);
+}
 
 + (OCToolDefinition *)bashTool {
     OCToolDefinition *t = [[[OCToolDefinition alloc] init] autorelease];
     t.name = @"bash";
     t.toolDescription = @"Execute a shell command and return output. Use for system tasks.";
     t.inputSchema = @{@"type": @"object",
-        @"properties": @{@"command": @{@"type": @"string"}},
+        @"properties": @{@"command": @{@"type": @"string", @"description": @"Shell command to execute. No shell metacharacters allowed."}},
         @"required": @[@"command"]};
     t.requiresConfirmation = YES;
     t.timeout = 30.0;
     t.handler = ^(NSDictionary *params, OCToolResultBlock cb) {
         NSString *cmd = [params objectForKey:@"command"];
         if (!cmd) { cb(@"Missing command", nil); return; }
+        
+        /* SECURITY: Validate command before execution */
+        NSString *validationError = nil;
+        if (![OCExtendedTools _isCommandSafe:cmd error:&validationError]) {
+            cb([NSString stringWithFormat:@"SECURITY: Command rejected: %@", validationError], nil);
+            return;
+        }
 
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            /* Use popen() since NSTask isn't available on iOS */
-            NSString *fullCmd = [NSString stringWithFormat:@"%@ 2>&1", cmd];
-            FILE *fp = popen([fullCmd UTF8String], "r");
-            if (!fp) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    cb(@"Failed to execute command", nil);
-                });
-                return;
-            }
-
-            NSMutableString *output = [NSMutableString stringWithCapacity:1024];
-            char buf[256];
-            while (fgets(buf, sizeof(buf), fp) != NULL) {
-                [output appendFormat:@"%s", buf];
-                /* Cap at 16KB */
-                if ([output length] > 16384) break;
-            }
-            int status = pclose(fp);
-
-            NSMutableString *result = [NSMutableString stringWithFormat:@"Exit code: %d\n", WEXITSTATUS(status)];
-            if ([output length] > 0) [result appendFormat:@"Output:\n%@", output];
-
-            dispatch_async(dispatch_get_main_queue(), ^{ cb(result, nil); });
+            [OCExtendedTools _executeCommandSafely:cmd timeout:30.0 completion:^(NSString *output, int exitCode) {
+                NSMutableString *result = [NSMutableString stringWithFormat:@"Exit code: %d\n", exitCode];
+                if ([output length] > 0) [result appendFormat:@"Output:\n%@", output];
+                dispatch_async(dispatch_get_main_queue(), ^{ cb(result, nil); });
+            }];
         });
     };
     return t;

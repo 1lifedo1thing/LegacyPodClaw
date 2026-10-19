@@ -193,7 +193,13 @@ static OCStore *_nrStore = nil;
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         sqlite3 *db = NULL;
         if (sqlite3_open_v2([NOTES_DB UTF8String], &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { cb(@"Cannot open", nil); return; }
-        sqlite3_exec(db,[[NSString stringWithFormat:@"UPDATE ZNOTE SET ZDELETEDFLAG=1 WHERE Z_PK=%d",[[p objectForKey:@"id"] intValue]] UTF8String],NULL,NULL,NULL);
+        /* SECURITY FIX: Use parameterized query to prevent SQL injection */
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db, "UPDATE ZNOTE SET ZDELETEDFLAG=1 WHERE Z_PK=?", -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_int(stmt, 1, [[p objectForKey:@"id"] intValue]);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
         sqlite3_close(db); cb(@"Note deleted", nil);
     }; return t;
 }
@@ -278,7 +284,15 @@ static OCStore *_nrStore = nil;
         sqlite3 *db = NULL;
         if (sqlite3_open_v2([CALENDAR_DB UTF8String], &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { cb(@"Cannot open", nil); return; }
         double now = [[NSDate date] timeIntervalSinceReferenceDate];
-        sqlite3_exec(db,[[NSString stringWithFormat:@"UPDATE CalendarItem SET completion_date=%f,last_modified=%f WHERE ROWID=%d",now,now,[[p objectForKey:@"id"] intValue]] UTF8String],NULL,NULL,NULL);
+        /* SECURITY FIX: Use parameterized query to prevent SQL injection */
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db, "UPDATE CalendarItem SET completion_date=?,last_modified=? WHERE ROWID=?", -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_double(stmt, 1, now);
+            sqlite3_bind_double(stmt, 2, now);
+            sqlite3_bind_int(stmt, 3, [[p objectForKey:@"id"] intValue]);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
         sqlite3_close(db); cb(@"Reminder completed", nil);
     }; return t;
 }
@@ -291,7 +305,13 @@ static OCStore *_nrStore = nil;
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         sqlite3 *db = NULL;
         if (sqlite3_open_v2([CALENDAR_DB UTF8String], &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { cb(@"Cannot open", nil); return; }
-        sqlite3_exec(db,[[NSString stringWithFormat:@"DELETE FROM CalendarItem WHERE ROWID=%d AND entity_type=3",[[p objectForKey:@"id"] intValue]] UTF8String],NULL,NULL,NULL);
+        /* SECURITY FIX: Use parameterized query to prevent SQL injection */
+        sqlite3_stmt *stmt = NULL;
+        if (sqlite3_prepare_v2(db, "DELETE FROM CalendarItem WHERE ROWID=? AND entity_type=3", -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_int(stmt, 1, [[p objectForKey:@"id"] intValue]);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
         sqlite3_close(db);
         FILE *fp = popen("killall Reminders 2>/dev/null", "r"); if(fp) pclose(fp);
         cb(@"Reminder deleted", nil);

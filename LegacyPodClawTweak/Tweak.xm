@@ -17,7 +17,38 @@
 #import <sys/socket.h>
 #import <netdb.h>
 #import <sqlite3.h>
-#import <wolfssl/ssl.h>
+#import "TLSClient.h"
+#import <Security/Security.h>
+
+/* Keychain helper for secure API key storage - KEYCHAIN ONLY, NO PLIST FALLBACK */
+static NSString *_keychainGetAPIKey(void) {
+    NSString *service = @"pro.matthesketh.legacypodclaw";
+    NSString *key = @"api_key_anthropic";
+    
+    NSMutableDictionary *query = [NSMutableDictionary dictionary];
+    [query setObject:(id)kSecClassGenericPassword forKey:(id)kSecClass];
+    [query setObject:key forKey:(id)kSecAttrAccount];
+    [query setObject:service forKey:(id)kSecAttrService];
+    [query setObject:(id)kSecReturnData forKey:(id)kSecReturnData];
+    [query setObject:(id)kSecMatchLimitOne forKey:(id)kSecMatchLimit];
+    
+    CFDataRef dataRef = NULL;
+    OSStatus status = SecItemCopyMatching((CFDictionaryRef)query, (CFTypeRef *)&dataRef);
+    
+    if (status == errSecSuccess && dataRef) {
+        NSData *data = (NSData *)dataRef;
+        NSString *apiKey = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (dataRef) CFRelease(dataRef);
+        return [apiKey autorelease];
+    }
+    
+    /* SECURITY: No plist fallback - keychain only for API key security */
+    if (status != errSecSuccess) {
+        NSLog(@"[LegacyPodClaw] API key not found in keychain (status: %d). Key must be configured in app.", (int)status);
+    }
+    
+    return nil;
+}
 
 /* Session persistence — write overlay conversations to the app's DB */
 #define APP_DB_PATH @"/var/mobile/Documents/openclaw.db"
@@ -100,9 +131,16 @@ static void _persistOverlayMessage(NSString *content, int role) {
     }
 
     /* Update session timestamp and message count */
-    sqlite3_exec(db, [[NSString stringWithFormat:
-        @"UPDATE sessions SET last_active_at = %f, total_messages = total_messages + 1 WHERE key = '%@'",
-        now, _overlaySessionKey] UTF8String], NULL, NULL, NULL);
+    /* SECURITY FIX: Use prepared statement with parameter binding instead of stringWithFormat */
+    sqlite3_stmt *updateStmt;
+    if (sqlite3_prepare_v2(db,
+        "UPDATE sessions SET last_active_at = ?, total_messages = total_messages + 1 WHERE key = ?",
+        -1, &updateStmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_double(updateStmt, 1, now);
+        sqlite3_bind_text(updateStmt, 2, [_overlaySessionKey UTF8String], -1, SQLITE_TRANSIENT);
+        sqlite3_step(updateStmt);
+        sqlite3_finalize(updateStmt);
+    }
 
     sqlite3_close(db);
 }
@@ -145,7 +183,6 @@ static void _persistOverlayMessage(NSString *content, int role) {
     BOOL _isProcessing;
     NSMutableArray *_conversationHistory; /* Array of {role, content} dicts */
     NSMutableString *_streamBuf;
-    NSMutableString *_sseBuf;
     NSURLConnection *_conn;
 }
 @property (nonatomic, assign) BOOL isVisible;
@@ -159,7 +196,6 @@ static void _persistOverlayMessage(NSString *content, int role) {
     if ((self = [super initWithFrame:frame])) {
         self.userInteractionEnabled = YES;
         _streamBuf = [[NSMutableString alloc] init];
-        _sseBuf = [[NSMutableString alloc] init];
         _conversationHistory = [[NSMutableArray alloc] initWithCapacity:20];
         CGFloat w = frame.size.width;
         CGFloat h = frame.size.height;
@@ -284,7 +320,7 @@ static void _persistOverlayMessage(NSString *content, int role) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_dimView release]; [_panel release]; [_inputField release];
     [_responseArea release]; [_typingDots release]; [_closeBtn release];
-    [_streamBuf release]; [_sseBuf release]; [_conn release];
+    [_streamBuf release]; [_conn release];
     [super dealloc];
 }
 
@@ -382,15 +418,16 @@ static void _persistOverlayMessage(NSString *content, int role) {
 
     _isProcessing = YES;
     [_streamBuf setString:@""];
-    [_sseBuf setString:@""];
 
     /* Persist user message to app's DB */
     _ensureOverlaySession();
     _persistOverlayMessage(q, 0); /* 0 = OCMessageRoleUser */
 
-    /* Get API key from prefs */
+    /* Get API key from secure keychain (with plist fallback) */
+    NSString *apiKey = _keychainGetAPIKey();
+    
+    /* Get model from prefs */
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-    NSString *apiKey = [prefs objectForKey:@"apiKey"];
     NSString *model = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514";
 
     if (!apiKey || [apiKey length] == 0) {
@@ -403,7 +440,6 @@ static void _persistOverlayMessage(NSString *content, int role) {
     /* Trim history to last 10 messages to fit context window */
     while ([_conversationHistory count] > 10) [_conversationHistory removeObjectAtIndex:0];
 
-    /* Use wolfSSL TLS 1.2 directly (iOS 6 system TLS is broken) */
     NSDictionary *body = @{
         @"model": model,
         @"max_tokens": @(1024),
@@ -416,222 +452,68 @@ static void _persistOverlayMessage(NSString *content, int role) {
         @"messages": _conversationHistory
     };
     NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    NSDictionary *headers = @{
+        @"Content-Type": @"application/json",
+        @"Accept": @"text/event-stream",
+        @"anthropic-version": @"2023-06-01",
+        @"x-api-key": apiKey
+    };
 
-    NSString *httpReqStr = [NSString stringWithFormat:
-        @"POST /v1/messages HTTP/1.1\r\n"
-        @"Host: api.anthropic.com\r\n"
-        @"Content-Type: application/json\r\n"
-        @"anthropic-version: 2023-06-01\r\n"
-        @"x-api-key: %@\r\n"
-        @"Accept: text/event-stream\r\n"
-        @"Content-Length: %lu\r\n"
-        @"Connection: close\r\n"
-        @"\r\n", apiKey, (unsigned long)[bodyData length]];
-
-    NSData *httpReqData = [httpReqStr dataUsingEncoding:NSUTF8StringEncoding];
-
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _responseArea.text = @"Connecting via TLS 1.2...";
-            _responseArea.textColor = [UIColor colorWithWhite:0.6f alpha:1];
-        });
-
-        static BOOL _wolfInited = NO;
-        if (!_wolfInited) { wolfSSL_Init(); _wolfInited = YES; }
-
-        /* DNS resolve */
-        struct addrinfo hints, *res;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        if (getaddrinfo("api.anthropic.com", "443", &hints, &res) != 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self _showResult:@"DNS resolution failed"];
-            });
-            return;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _responseArea.text = @"DNS resolved, connecting...";
-        });
-
-        int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-        int connectResult = connect(sock, res->ai_addr, res->ai_addrlen);
-        freeaddrinfo(res);
-
-        if (connectResult != 0) {
-            close(sock);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self _showResult:@"TCP connect failed"];
-            });
-            return;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _responseArea.text = @"TCP connected, TLS handshake...";
-        });
-
-        /* TLS */
-        WOLFSSL_CTX *ctx = wolfSSL_CTX_new(wolfTLSv1_2_client_method());
-        wolfSSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
-        WOLFSSL *ssl = wolfSSL_new(ctx);
-        wolfSSL_set_fd(ssl, sock);
-        wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, "api.anthropic.com", 18);
-
-        if (wolfSSL_connect(ssl) != SSL_SUCCESS) {
-            int err = wolfSSL_get_error(ssl, 0);
-            char errBuf[128];
-            wolfSSL_ERR_error_string(err, errBuf);
-            NSString *errStr = [NSString stringWithUTF8String:errBuf];
-            wolfSSL_free(ssl); wolfSSL_CTX_free(ctx); close(sock);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self _showResult:[NSString stringWithFormat:@"TLS failed: %@", errStr]];
-            });
-            return;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _responseArea.text = @"TLS 1.2 connected! Sending request...";
-        });
-
-        /* Send HTTP request */
-        wolfSSL_write(ssl, [httpReqData bytes], (int)[httpReqData length]);
-        wolfSSL_write(ssl, [bodyData bytes], (int)[bodyData length]);
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _responseArea.text = @"Request sent, waiting for response...";
-        });
-
-        /* Read response — handle chunked transfer encoding */
-        char buf[4096];
-        BOOL headersDone = NO;
-        NSMutableData *headerBuf = [NSMutableData dataWithCapacity:2048];
-        NSMutableData *bodyBuf = [NSMutableData dataWithCapacity:8192];
-        int httpStatus = 0;
-
-        while (1) {
-            int n = wolfSSL_read(ssl, buf, sizeof(buf));
-            if (n <= 0) break;
-
-            if (!headersDone) {
-                [headerBuf appendBytes:buf length:n];
-                const uint8_t *bytes = (const uint8_t *)[headerBuf bytes];
-                NSUInteger len = [headerBuf length];
-                for (NSUInteger i = 0; i + 3 < len; i++) {
-                    if (bytes[i]=='\r' && bytes[i+1]=='\n' && bytes[i+2]=='\r' && bytes[i+3]=='\n') {
-                        headersDone = YES;
-
-                        /* Parse status code */
-                        NSString *headerStr = [[NSString alloc] initWithBytes:bytes
-                            length:i encoding:NSUTF8StringEncoding];
-                        if ([headerStr length] > 12) {
-                            httpStatus = [[headerStr substringWithRange:NSMakeRange(9, 3)] intValue];
-                        }
-                        [headerStr release];
-
-                        /* Remaining data after headers */
-                        if (i + 4 < len) {
-                            [bodyBuf appendBytes:bytes+i+4 length:len-i-4];
-                        }
-                        break;
-                    }
-                }
-            } else {
-                [bodyBuf appendBytes:buf length:n];
+    NSMutableData *pending = [NSMutableData data];
+    [CPTLSClient streamRequest:@"https://api.anthropic.com/v1/messages" method:@"POST"
+                       headers:headers body:bodyData
+        onChunk:^(NSData *chunk) {
+            [pending appendData:chunk];
+            const char *bytes = (const char *)[pending bytes];
+            NSUInteger len = [pending length], start = 0;
+            for (NSUInteger i = 0; i < len; i++) {
+                if (bytes[i] != '\n') continue;
+                NSString *line = [[NSString alloc] initWithBytes:bytes + start length:i - start
+                                                        encoding:NSUTF8StringEncoding];
+                if (line) [self _handleSSELine:line];
+                [line release];
+                start = i + 1;
             }
+            [pending replaceBytesInRange:NSMakeRange(0, start) withBytes:NULL length:0];
         }
-
-        /* Check for HTTP errors */
-        if (httpStatus != 200) {
-            NSString *bodyStr = [[NSString alloc] initWithData:bodyBuf encoding:NSUTF8StringEncoding];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self _showResult:[NSString stringWithFormat:@"HTTP %d: %@",
-                    httpStatus, bodyStr ?: @"Unknown error"]];
-            });
-            [bodyStr release];
-            wolfSSL_shutdown(ssl); wolfSSL_free(ssl); wolfSSL_CTX_free(ctx); close(sock);
-            return;
-        }
-
-        /* Decode chunked transfer encoding if present.
-           Strip hex chunk size lines: lines that are only hex digits + optional \r */
-        NSString *rawBody = [[NSString alloc] initWithData:bodyBuf encoding:NSUTF8StringEncoding];
-        if (rawBody) {
-            /* Remove chunk size lines (hex digits followed by \r) */
-            NSMutableString *cleanBody = [NSMutableString stringWithCapacity:[rawBody length]];
-            NSArray *rawLines = [rawBody componentsSeparatedByString:@"\n"];
-            for (NSString *line in rawLines) {
-                NSString *trimmed = [line stringByTrimmingCharactersInSet:
-                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                /* Skip lines that are only hex digits (chunk sizes) or empty */
-                if ([trimmed length] == 0) { [cleanBody appendString:@"\n"]; continue; }
-                BOOL isChunkSize = YES;
-                for (NSUInteger ci = 0; ci < [trimmed length]; ci++) {
-                    unichar ch = [trimmed characterAtIndex:ci];
-                    if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) {
-                        isChunkSize = NO; break;
-                    }
-                }
-                if (isChunkSize && [trimmed length] <= 8) continue; /* Skip chunk size */
-                [cleanBody appendString:line];
-                [cleanBody appendString:@"\n"];
+        completion:^(NSData *data, NSInteger status, NSError *error) {
+            if (error || status != 200) {
+                [_conversationHistory removeLastObject];
+                NSString *detail = error ? [error localizedDescription]
+                    : [NSString stringWithFormat:@"HTTP %ld: %@", (long)status,
+                       [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease] ?: @""];
+                [self _showResult:detail];
+                return;
             }
-            [self _processSSEChunk:cleanBody];
-            [rawBody release];
-        }
-
-        wolfSSL_shutdown(ssl);
-        wolfSSL_free(ssl);
-        wolfSSL_CTX_free(ctx);
-        close(sock);
-
-        dispatch_async(dispatch_get_main_queue(), ^{
             _isProcessing = NO;
             _typingDots.hidden = YES;
             if ([_streamBuf length] > 0) {
-                [_conversationHistory addObject:@{@"role": @"assistant", @"content": [_streamBuf copy]}];
-                /* Persist assistant response to app's DB */
-                _persistOverlayMessage(_streamBuf, 1); /* 1 = OCMessageRoleAssistant */
+                NSString *reply = [[_streamBuf copy] autorelease];
+                [_conversationHistory addObject:@{@"role": @"assistant", @"content": reply}];
+                _persistOverlayMessage(reply, 1); /* 1 = OCMessageRoleAssistant */
             }
-        });
-    });
+        }];
 }
 
-- (void)_processSSEChunk:(NSString *)chunk {
-    [_sseBuf appendString:chunk];
-    NSArray *lines = [_sseBuf componentsSeparatedByString:@"\n"];
-    [_sseBuf setString:[lines lastObject] ?: @""];
+/* runs on the main queue: CPTLSClient delivers chunks there */
+- (void)_handleSSELine:(NSString *)line {
+    if (![line hasPrefix:@"data:"]) return;
+    NSData *json = [[line substringFromIndex:5] dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *evt = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
+    if (![evt isKindOfClass:[NSDictionary class]]) return;
 
-    /* Debug: show raw first chunk if nothing streaming yet */
-    if ([_streamBuf length] == 0 && [chunk length] > 0 && [chunk length] < 200) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if ([_streamBuf length] == 0) {
-                _typingDots.hidden = YES;
-                _responseArea.textColor = [UIColor colorWithWhite:0.5f alpha:1];
-                _responseArea.text = [NSString stringWithFormat:@"[receiving data...]"];
-            }
-        });
-    }
-
-    for (NSUInteger i = 0; i < [lines count] - 1; i++) {
-        NSString *line = [lines objectAtIndex:i];
-        if (![line hasPrefix:@"data: "]) continue;
-        NSString *json = [line substringFromIndex:6];
-        if ([json isEqualToString:@"[DONE]"]) continue;
-        NSDictionary *evt = [NSJSONSerialization JSONObjectWithData:
-            [json dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
-        if (!evt) continue;
-        if ([[evt objectForKey:@"type"] isEqualToString:@"content_block_delta"]) {
-            NSString *text = [[evt objectForKey:@"delta"] objectForKey:@"text"];
-            if (text) {
-                [_streamBuf appendString:text];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    _typingDots.hidden = YES;
-                    _responseArea.textColor = [UIColor colorWithWhite:0.88f alpha:1];
-                    _responseArea.text = _streamBuf;
-                });
-            }
-        }
+    NSString *type = [evt objectForKey:@"type"];
+    if ([type isEqualToString:@"content_block_delta"]) {
+        NSString *text = [[evt objectForKey:@"delta"] objectForKey:@"text"];
+        if (![text isKindOfClass:[NSString class]]) return;
+        [_streamBuf appendString:text];
+        _typingDots.hidden = YES;
+        _responseArea.textColor = [UIColor colorWithWhite:0.88f alpha:1];
+        _responseArea.text = _streamBuf;
+    } else if ([type isEqualToString:@"error"]) {
+        NSString *message = [[evt objectForKey:@"error"] objectForKey:@"message"];
+        [_streamBuf appendFormat:@"\n[%@]", message ?: @"stream error"];
+        _responseArea.text = _streamBuf;
     }
 }
 

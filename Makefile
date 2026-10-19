@@ -46,7 +46,8 @@ LegacyPodClaw_FILES = \
 	Frameworks/Tools/NotesReminders.m \
 	Frameworks/Tools/MusicDownloader.m \
 	Frameworks/System/System.m \
-	Frameworks/System/TLSClient.m
+	Frameworks/System/TLSClient.m \
+	Frameworks/System/SecureKeychain.m
 
 LegacyPodClaw_CFLAGS = \
 	-IFrameworks/WebSocket \
@@ -73,8 +74,11 @@ LegacyPodClaw_CFLAGS = \
 	-Wno-incompatible-pointer-types \
 	-Wno-objc-protocol-property-synthesis \
 	-Wno-protocol \
-	-IVendor/wolfssl \
-	-DWOLFSSL_USER_SETTINGS
+	-IVendor/wolfssl/include \
+	-IVendor/wolfssl-build \
+	-DWOLFSSL_USER_SETTINGS \
+	-DSECURITY_ENHANCED \
+	-DSECURE_KEYCHAIN_ENABLED
 
 LegacyPodClaw_OBJCFLAGS = -fno-objc-arc
 
@@ -84,7 +88,7 @@ LegacyPodClaw_LIBRARIES = sqlite3
 
 LegacyPodClaw_CFLAGS += -Os -ffast-math -fvisibility=hidden -fvisibility-inlines-hidden
 LegacyPodClaw_LDFLAGS = -dead_strip -ldl
-LegacyPodClaw_OBJ_FILES += /Users/matt/openclaw-ios6/Vendor/libwolfssl.a
+LegacyPodClaw_OBJ_FILES += $(THEOS_PROJECT_DIR)/Vendor/libwolfssl.a
 
 LegacyPodClaw_RESOURCE_DIRS = Resources
 

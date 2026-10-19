@@ -19,7 +19,4 @@ DerivedData/
 *~
 /tmp/
 
-# wolfSSL source (vendored as compiled .a only)
-Vendor/wolfssl/
-Vendor/wolfssl_config.h
 __pycache__/

@@ -11,6 +11,7 @@
 #import <mach-o/dyld.h>
 #import <IOKit/IOKitLib.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <Security/Security.h> /* SECURITY FIX: For SecRandomCopyBytes token generation */
 
 #pragma mark - CPDistributedMessagingCenter Forward Declaration
 
@@ -20,6 +21,7 @@
 
 @interface CPDaemonClient () {
     id _center; /* CPDistributedMessagingCenter, loaded at runtime */
+    NSString *_authToken; /* SECURITY FIX: Shared secret for daemon authentication */
 }
 @end
 
@@ -41,11 +43,36 @@
             _center = [[CPDMCClass performSelector:@selector(centerNamed:)
                                         withObject:@"pro.matthesketh.legacypodclaw.daemon"] retain];
         }
+
+        /* SECURITY FIX: Generate or load authentication token for daemon IPC */
+        _authToken = [[self _ensureAuthToken] retain];
     }
     return self;
 }
 
-- (void)dealloc { [_center release]; [super dealloc]; }
+/* Generate a random 32-byte hex token for daemon authentication */
+- (NSString *)_ensureAuthToken {
+    NSString *prefsPath = @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist";
+    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:prefsPath];
+    if (!prefs) prefs = [NSMutableDictionary dictionary];
+
+    NSString *token = [prefs objectForKey:@"daemonAuthToken"];
+    if (!token || [token length] == 0) {
+        /* Generate new random token (32 bytes = 64 hex chars) */
+        uint8_t bytes[32];
+        arc4random_buf(bytes, sizeof(bytes));
+        NSMutableString *hex = [NSMutableString stringWithCapacity:64];
+        for (int i = 0; i < 32; i++) {
+            [hex appendFormat:@"%02x", bytes[i]];
+        }
+        token = hex;
+        [prefs setObject:token forKey:@"daemonAuthToken"];
+        [prefs writeToFile:prefsPath atomically:YES];
+    }
+    return token;
+}
+
+- (void)dealloc { [_center release]; [_authToken release]; [super dealloc]; }
 
 /* Helper to call sendMessageAndReceiveReplyName:userInfo: dynamically */
 - (NSDictionary *)_sendAndReceive:(NSString *)name info:(NSDictionary *)info {
@@ -53,13 +80,19 @@
     SEL sel = @selector(sendMessageAndReceiveReplyName:userInfo:);
     if (![_center respondsToSelector:sel]) return @{@"error": @"IPC not available"};
 
+    /* SECURITY FIX: Include authentication token in all IPC calls */
+    NSMutableDictionary *authInfo = [NSMutableDictionary dictionaryWithDictionary:info];
+    if (_authToken) {
+        [authInfo setObject:_authToken forKey:@"authToken"];
+    }
+
     /* Use NSInvocation for two-arg selector */
     NSMethodSignature *sig = [_center methodSignatureForSelector:sel];
     NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
     [inv setTarget:_center];
     [inv setSelector:sel];
     [inv setArgument:&name atIndex:2];
-    [inv setArgument:&info atIndex:3];
+    [inv setArgument:&authInfo atIndex:3];
     [inv invoke];
     NSDictionary *result = nil;
     [inv getReturnValue:&result];

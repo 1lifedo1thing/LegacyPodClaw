@@ -20,7 +20,7 @@
 
 /* stops every run and forgets every chat */
 - (void)reset;
-/* stops the runs and forgets the chats of one channel */
+/* forgets the chats of one channel; a run already in progress still ends and replies */
 - (void)resetChannel:(NSString *)channelId;
 
 @end

@@ -936,10 +936,53 @@ static CGFloat CPLockLabelTop(UIView *away) {
     return bottom;
 }
 
+/* a view with a hidden or clear ancestor is not on screen, also when its own flags say so */
+static BOOL CPViewIsShown(UIView *v, UIView *root) {
+    for (; v && v != root; v = v.superview)
+        if (v.hidden || v.alpha < 0.01f) return NO;
+    return v == root;
+}
+
+/* the bulletin list starts at the bottom of the date bar, so its first row lies under the label */
+static BOOL CPBulletinRowCoversLabel(UIView *away) {
+    id list = nil;
+    @try { list = [away valueForKey:@"_bulletinController"]; } @catch (NSException *e) {}
+    if (!list || ![list respondsToSelector:@selector(view)]) return NO;
+    UIView *listView = [list performSelector:@selector(view)];
+    if (![listView isKindOfClass:[UIView class]] || listView.window != away.window || !away.window) return NO;
+
+    NSMutableArray *todo = [NSMutableArray arrayWithObject:listView];
+    while ([todo count]) {
+        UIView *v = [todo lastObject];
+        [todo removeLastObject];
+        if (![v isKindOfClass:[UITableView class]]) {
+            [todo addObjectsFromArray:v.subviews];
+            continue;
+        }
+        if (!CPViewIsShown(v, away)) continue;
+        /* the table clips its rows, so a row counts only where it is inside the table */
+        CGRect clip = [v convertRect:v.bounds toView:away];
+        for (UITableViewCell *cell in [(UITableView *)v visibleCells]) {
+            if (cell.hidden || cell.alpha < 0.01f) continue;
+            CGRect r = CGRectIntersection([cell convertRect:cell.bounds toView:away], clip);
+            if (CGRectIntersectsRect(r, _lsLabel.frame)) return YES;
+        }
+    }
+    return NO;
+}
+
+static void CPUpdateLockLabelCover(void) {
+    UIView *away = _lsLabel.superview;
+    if (!away) return;
+    BOOL cover = CPBulletinRowCoversLabel(away);
+    if (_lsLabel.hidden != cover) _lsLabel.hidden = cover;
+}
+
 static void CPPlaceLockLabel(UIView *away) {
     if (!_lsLabel || _lsLabel.superview != away) return;
     CGRect want = CGRectMake(10, CPLockLabelTop(away) + 2, away.bounds.size.width - 20, 18);
     if (!CGRectEqualToRect(_lsLabel.frame, want)) _lsLabel.frame = want;
+    CPUpdateLockLabelCover();
 }
 
 %hook SBAwayView
@@ -970,6 +1013,26 @@ static void CPPlaceLockLabel(UIView *away) {
 - (void)layoutSubviews {
     %orig;
     CPPlaceLockLabel(self);
+}
+
+%end
+
+/* the list changes style and rows without a layout of the away view, so check the label on each list layout */
+%hook SBAwayBulletinListView
+
+- (void)layoutSubviews {
+    %orig;
+    CPUpdateLockLabelCover();
+}
+
+%end
+
+/* row inserts, removals and scrolls lay out only the table */
+%hook SBAwayBulletinTableView
+
+- (void)layoutSubviews {
+    %orig;
+    CPUpdateLockLabelCover();
 }
 
 %end

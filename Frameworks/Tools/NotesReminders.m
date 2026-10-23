@@ -102,9 +102,16 @@ static EKReminder *NRFindReminder(EKEventStore *store, NSString *rid) {
                 if (!*err) *err = @"Notes schema mismatch: Note or NoteBody missing from Z_PRIMARYKEY.";
                 return nil;
             }
-            if (!NRQueryInt(db, "SELECT ZCOUNTER FROM ZNEXTID WHERE Z_PK=1", @[], &counter, err)) {
-                if (!*err) *err = @"Notes schema mismatch: ZNEXTID has no counter row.";
-                return nil;
+            BOOL hasCounter = NRQueryInt(db, "SELECT ZCOUNTER FROM ZNEXTID WHERE Z_PK=1", @[], &counter, err);
+            sqlite3_int64 nextIdEnt = 0;
+            if (!hasCounter) {
+                if (*err) return nil;
+                /* a store that never held a note has no counter row; notes.app adds it with its first note */
+                if (!NRQueryInt(db, "SELECT Z_ENT FROM Z_PRIMARYKEY WHERE Z_NAME=?", @[@"NextId"], &nextIdEnt, err)) {
+                    if (!*err) *err = @"Notes schema mismatch: NextId missing from Z_PRIMARYKEY.";
+                    return nil;
+                }
+                counter = 0;
             }
             /* new notes join the store the user wrote to last, so they do not land in a sync account by chance */
             if (!NRQueryInt(db, "SELECT ZSTORE FROM ZNOTE WHERE ZDELETEDFLAG=0 ORDER BY ZMODIFICATIONDATE DESC LIMIT 1", @[], &storePK, err) &&
@@ -125,7 +132,13 @@ static EKReminder *NRFindReminder(EKEventStore *store, NSString *rid) {
                 @[@(notePK), @(noteEnt), @(intId), @(bodyPK), @(storePK), @(now), @(now), title], err) != 1) return nil;
             if (NRExec(db, "UPDATE Z_PRIMARYKEY SET Z_MAX=? WHERE Z_NAME=?", @[@(notePK), @"Note"], err) != 1) return nil;
             if (NRExec(db, "UPDATE Z_PRIMARYKEY SET Z_MAX=? WHERE Z_NAME=?", @[@(bodyPK), @"NoteBody"], err) != 1) return nil;
-            if (NRExec(db, "UPDATE ZNEXTID SET ZCOUNTER=? WHERE Z_PK=1", @[@(intId)], err) != 1) return nil;
+            if (hasCounter) {
+                if (NRExec(db, "UPDATE ZNEXTID SET ZCOUNTER=? WHERE Z_PK=1", @[@(intId)], err) != 1) return nil;
+            } else {
+                if (NRExec(db, "INSERT INTO ZNEXTID (Z_PK,Z_ENT,Z_OPT,ZCOUNTER) VALUES (1,?,1,?)",
+                           @[@(nextIdEnt), @(intId)], err) != 1) return nil;
+                if (NRExec(db, "UPDATE Z_PRIMARYKEY SET Z_MAX=1 WHERE Z_NAME=?", @[@"NextId"], err) != 1) return nil;
+            }
             return [NSString stringWithFormat:@"Note '%@' created (ID: %lld).", title, notePK];
         });
     };

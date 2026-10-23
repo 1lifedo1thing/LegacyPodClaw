@@ -62,6 +62,9 @@ static AppDelegate *_shared = nil;
     /* Initialize SQLite store */
     NSString *docsPath = [NSSearchPathForDirectoriesInDomains(
         NSDocumentDirectory, NSUserDomainMask, YES) objectAtIndex:0];
+    /* a system app's documents directory is /var/mobile/Documents, which a fresh device lacks */
+    [[NSFileManager defaultManager] createDirectoryAtPath:docsPath withIntermediateDirectories:YES
+                                               attributes:nil error:nil];
     NSString *dbPath = [docsPath stringByAppendingPathComponent:@"openclaw.db"];
 
     _store = [[OCStore alloc] initWithPath:dbPath];
@@ -194,6 +197,12 @@ static AppDelegate *_shared = nil;
 }
 
 - (void)applicationWillEnterForeground:(UIApplication *)application {
+    /* ios reclaims a suspended app's listening socket, so the server must listen again */
+    if (_gatewayServer.isRunning) {
+        [self stopGatewayServer];
+        NSError *err = nil;
+        if (![self startGatewayServer:&err]) NSLog(@"[LegacyPodClaw] gateway server did not restart: %@", err);
+    }
     /* Reconnect if needed */
     if (_gateway.connectionState == OCGatewayStateDisconnected &&
         _gateway.host && [_gateway.host length] > 0) {

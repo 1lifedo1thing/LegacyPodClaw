@@ -4,7 +4,7 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
 
-static NSString *const kWSGUID = @"258EAFA5-E914-47DA-95CA-5AB5DC11695A";
+static NSString *const kWSGUID = @"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 static const NSUInteger kMaxHandshakeBytes = 16 * 1024;
 
 static NSString *WSBase64(NSData *data) {

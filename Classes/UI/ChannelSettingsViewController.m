@@ -3,6 +3,7 @@
 #import "ChannelSettingsViewController.h"
 #import "AppDelegate.h"
 #import "SecretStore.h"
+#import "ChannelManager.h"
 #import <sys/stat.h>
 #import <notify.h>
 
@@ -80,11 +81,15 @@ static NSDictionary *Field(NSString *label, NSString *key, NSString *type, NSStr
         self.title = title;
         _fields = [fields copy];
         _footer = [footer copy];
+        /* the channel changes state long after the setting that caused it, so the status row must follow it */
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_channelStatusChanged:)
+                                                     name:OCChannelStatusDidChangeNotification object:nil];
     }
     return self;
 }
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_fields release]; [_footer release]; [_editingKey release];
     [super dealloc];
 }
@@ -118,6 +123,16 @@ static NSDictionary *Field(NSString *label, NSString *key, NSString *type, NSStr
     return [s length] ? s : @"Not set";
 }
 
+- (NSString *)_channelId {
+    /* the first field is always the channel's enable switch, named after the channel id */
+    return [[[_fields objectAtIndex:0] objectForKey:@"key"] stringByReplacingOccurrencesOfString:@"Enabled" withString:@""];
+}
+
+- (void)_channelStatusChanged:(NSNotification *)note {
+    if (![self isViewLoaded] || ![[note object] isEqual:[self _channelId]]) return;
+    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1] withRowAnimation:UITableViewRowAnimationNone];
+}
+
 #pragma mark - Table
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView { return 2; }
@@ -133,8 +148,7 @@ static NSDictionary *Field(NSString *label, NSString *key, NSString *type, NSStr
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil] autorelease];
     if (indexPath.section == 1) {
-        /* the first field is always the channel's enable switch, named after the channel id */
-        NSString *cid = [[[_fields objectAtIndex:0] objectForKey:@"key"] stringByReplacingOccurrencesOfString:@"Enabled" withString:@""];
+        NSString *cid = [self _channelId];
         NSDictionary *status = [[[AppDelegate shared].channelManager allChannelStatus] objectForKey:cid];
         cell.textLabel.text = @"Status";
         cell.selectionStyle = UITableViewCellSelectionStyleNone;

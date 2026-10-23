@@ -51,6 +51,7 @@ static const NSUInteger kSlackMaxChars = 3500;
     _running = NO;
     _generation++;
     [self _teardown];
+    OCChannelStatusChanged(self);
 }
 
 - (void)_teardown {
@@ -63,6 +64,7 @@ static const NSUInteger kSlackMaxChars = 3500;
 - (void)_setError:(NSString *)error {
     [_lastError release];
     _lastError = [error copy];
+    OCChannelStatusChanged(self);
 }
 
 - (void)_retry:(NSString *)reason {

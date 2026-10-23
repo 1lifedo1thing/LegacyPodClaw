@@ -55,6 +55,7 @@ static const NSUInteger kDiscordIntents = (1 << 0) | (1 << 9) | (1 << 12) | (1 <
     _running = NO;
     _connectGeneration++;
     [self _teardown];
+    OCChannelStatusChanged(self);
 }
 
 - (void)_teardown {
@@ -78,6 +79,7 @@ static const NSUInteger kDiscordIntents = (1 << 0) | (1 << 9) | (1 << 12) | (1 <
     [self _teardown];
     if (!_running) return;
     [_lastError release]; _lastError = [reason copy];
+    OCChannelStatusChanged(self);
     _backoff = MIN(MAX(_backoff * 2, 2.0), 120.0);
     NSUInteger gen = ++_connectGeneration;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(_backoff * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -103,6 +105,7 @@ static const NSUInteger kDiscordIntents = (1 << 0) | (1 << 9) | (1 << 12) | (1 <
     if (fatal) {
         [self stop];
         [_lastError release]; _lastError = [fatal copy];
+        OCChannelStatusChanged(self);
         NSLog(@"[Discord] %@", fatal);
         return;
     }
@@ -164,6 +167,7 @@ static const NSUInteger kDiscordIntents = (1 << 0) | (1 << 9) | (1 << 12) | (1 <
         _connected = YES;
         _backoff = 0;
         [_lastError release]; _lastError = nil;
+        OCChannelStatusChanged(self);
         [_botUserId release];
         _botUserId = [[[[d objectForKey:@"user"] objectForKey:@"id"] description] copy];
     } else if ([event isEqualToString:@"MESSAGE_CREATE"]) {

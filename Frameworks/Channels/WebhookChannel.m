@@ -33,8 +33,8 @@ static const NSUInteger kWebhookMaxText = 8000;
     NSString *scheme = [[[NSURL URLWithString:_callbackURL] scheme] lowercaseString];
     return [scheme isEqualToString:@"https"] || [scheme isEqualToString:@"http"];
 }
-- (void)start { _running = [self isConfigured]; }
-- (void)stop { _running = NO; }
+- (void)start { _running = [self isConfigured]; OCChannelStatusChanged(self); }
+- (void)stop { _running = NO; OCChannelStatusChanged(self); }
 
 static NSString *StringField(NSDictionary *d, NSString *key) {
     id v = [d objectForKey:key];

@@ -52,11 +52,13 @@ static const NSTimeInterval kMaxMessageAge = 600;
     _running = NO;
     _connected = NO;
     _pollGeneration++;
+    OCChannelStatusChanged(self);
 }
 
 - (void)_setError:(NSString *)error {
     [_lastError release];
     _lastError = [error copy];
+    OCChannelStatusChanged(self);
 }
 
 - (void)_poll {

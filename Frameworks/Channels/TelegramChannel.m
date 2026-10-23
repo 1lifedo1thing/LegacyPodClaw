@@ -2,10 +2,13 @@
 
 #import "TelegramChannel.h"
 #import "TLSClient.h"
+#import "SharedFiles.h"
 
 static NSString *const kTelegramAPI = @"https://api.telegram.org/bot";
 static const int kPollTimeout = 25;
 static const NSUInteger kTelegramMaxChars = 4000;
+/* the last confirmed update id, so a restart does not fetch and answer an update again */
+static NSString *const kTelegramStateFile = @"telegram.plist";
 /* updates queued while the app was closed are stale; answering them hours later confuses people */
 static const NSTimeInterval kMaxMessageAge = 600;
 
@@ -41,8 +44,22 @@ static NSString *TelegramErrorText(NSInteger status, id json) {
 - (instancetype)initWithBotToken:(NSString *)token {
     if ((self = [super init])) {
         _botToken = [token copy];
+        /* the bot id is the public part of the token; an offset from another bot would skip this bot's updates */
+        NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:CPSharedPath(kTelegramStateFile)];
+        if ([[state objectForKey:@"bot"] isEqual:[self _botId]])
+            _lastUpdateId = [[state objectForKey:@"lastUpdateId"] longLongValue];
     }
     return self;
+}
+
+- (NSString *)_botId {
+    NSRange colon = [_botToken rangeOfString:@":"];
+    return colon.location == NSNotFound ? @"" : [_botToken substringToIndex:colon.location];
+}
+
+- (void)_saveOffset {
+    if (!CPWriteSharedPlist(kTelegramStateFile, @{@"bot": [self _botId], @"lastUpdateId": @(_lastUpdateId)}))
+        NSLog(@"[Telegram] could not save the update offset");
 }
 
 - (void)dealloc {
@@ -106,6 +123,7 @@ static NSString *TelegramErrorText(NSInteger status, id json) {
         _backoff = 0;
         [self _setError:nil];
         NSArray *updates = [json objectForKey:@"result"];
+        long long before = _lastUpdateId;
         if ([updates isKindOfClass:[NSArray class]]) {
             for (NSDictionary *update in updates) {
                 if (![update isKindOfClass:[NSDictionary class]]) continue;
@@ -115,6 +133,7 @@ static NSString *TelegramErrorText(NSInteger status, id json) {
                 if ([msg isKindOfClass:[NSDictionary class]]) [self _processMessage:msg];
             }
         }
+        if (_lastUpdateId != before) [self _saveOffset];
         [self _pollAfter:0.2];
     }];
 }

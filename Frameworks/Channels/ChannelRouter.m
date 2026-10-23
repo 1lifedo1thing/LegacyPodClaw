@@ -75,6 +75,13 @@ static const NSUInteger kMaxInboundChars = 4000;
     [_sessions removeAllObjects];
 }
 
+- (void)resetChannel:(NSString *)channelId {
+    NSString *prefix = [channelId stringByAppendingString:@":"];
+    for (NSString *key in [_sessions allKeys]) {
+        if ([key hasPrefix:prefix]) [_sessions removeObjectForKey:key];
+    }
+}
+
 - (BOOL)_isAllowed:(OCChannelMessage *)msg {
     NSSet *allowed = [_allowed objectForKey:msg.channelId];
     if ([allowed count] == 0) return NO;

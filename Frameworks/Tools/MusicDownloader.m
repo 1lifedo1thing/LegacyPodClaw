@@ -508,6 +508,8 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
             @"album": @{@"type": @"string", @"description": @"Album name (optional)"}
         },
         @"required": @[@"video_id"]};
+    /* the info call allows 30 s and the download 120 s */
+    t.timeout = 180;
 
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSString *videoId = [p objectForKey:@"video_id"];
@@ -530,8 +532,8 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
             if (dup) { cb(dup, nil); return; }
 
             /* Prepare file path */
-            NSString *filename = [NSString stringWithFormat:@"CP%@.mp3",
-                [[videoId substringToIndex:MIN(4, [videoId length])] uppercaseString]];
+            /* the whole id, so two videos never share a file */
+            NSString *filename = [NSString stringWithFormat:@"CP%@.mp3", videoId];
             NSString *folder = [NSString stringWithFormat:@"%@/F00", MUSIC_DIR];
             [[NSFileManager defaultManager] createDirectoryAtPath:folder
                 withIntermediateDirectories:YES attributes:nil error:nil];
@@ -606,7 +608,8 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
     /* MediaLibrary uses Mac epoch (seconds since 2001-01-01), NOT Unix epoch */
     double now = [[NSDate date] timeIntervalSinceReferenceDate];
 
-    sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL);
+    /* a song with missing rows breaks music.app, so all rows go in or none do */
+    BOOL ok = sqlite3_exec(db, "BEGIN TRANSACTION", NULL, NULL, NULL) == SQLITE_OK;
 
     /* 1. sort_map entries for title, artist, album */
     int64_t titleOrder = _ensureSortMap(db, title);
@@ -624,6 +627,7 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
 
     /* 4. album */
     int64_t albumPid = _ensureAlbum(db, album, albumArtistPid);
+    ok = ok && artistPid != 0 && albumArtistPid != 0 && albumPid != 0;
 
     /* 5. base_location */
     int64_t baseLoc = 0;
@@ -639,8 +643,9 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
             "INSERT INTO base_location (base_location_id, path) VALUES (?, ?)", -1, &s, NULL) == SQLITE_OK) {
             sqlite3_bind_int64(s, 1, baseLoc);
             sqlite3_bind_text(s, 2, [folder UTF8String], -1, SQLITE_TRANSIENT);
-            sqlite3_step(s); sqlite3_finalize(s);
-        }
+            ok = ok && sqlite3_step(s) == SQLITE_DONE;
+            sqlite3_finalize(s);
+        } else ok = NO;
     }
 
     /* 6. item — the main song record */
@@ -668,10 +673,12 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
         sqlite3_bind_int(s, 12, artistSection);
         sqlite3_bind_int64(s, 13, baseLoc);
         rc = sqlite3_step(s);
-        sqlite3_finalize(s);
-        if (rc != SQLITE_DONE)
+        if (rc != SQLITE_DONE) {
             NSLog(@"[MusicDL] item INSERT failed: %s", sqlite3_errmsg(db));
-    }
+            ok = NO;
+        }
+        sqlite3_finalize(s);
+    } else ok = NO;
 
     /* 7. item_extra — all metadata */
     if (sqlite3_prepare_v2(db,
@@ -687,8 +694,9 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
         sqlite3_bind_int64(s, 6, (int64_t)fileSize);
         sqlite3_bind_int64(s, 7, (int64_t)now);
         sqlite3_bind_int64(s, 8, (int64_t)now);
-        sqlite3_step(s); sqlite3_finalize(s);
-    }
+        ok = ok && sqlite3_step(s) == SQLITE_DONE;
+        sqlite3_finalize(s);
+    } else ok = NO;
 
     /* 8. item_search — required for Music.app to find/display the song */
     if (sqlite3_prepare_v2(db,
@@ -700,8 +708,9 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
         sqlite3_bind_int64(s, 3, albumOrder);
         sqlite3_bind_int64(s, 4, artistOrder);
         sqlite3_bind_int64(s, 5, artistOrder); /* album_artist = artist */
-        sqlite3_step(s); sqlite3_finalize(s);
-    }
+        ok = ok && sqlite3_step(s) == SQLITE_DONE;
+        sqlite3_finalize(s);
+    } else ok = NO;
 
     /* 9. item_stats — required entry, all zeros */
     if (sqlite3_prepare_v2(db,
@@ -710,10 +719,18 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
         "skip_count_user, skip_count_recent, bookmark_time_ms, user_rating, hidden) "
         "VALUES (?, 0, 0, 0, 0, 0, 0.0, 0, 0)", -1, &s, NULL) == SQLITE_OK) {
         sqlite3_bind_int64(s, 1, itemPid);
-        sqlite3_step(s); sqlite3_finalize(s);
-    }
+        ok = ok && sqlite3_step(s) == SQLITE_DONE;
+        sqlite3_finalize(s);
+    } else ok = NO;
 
-    sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+    if (ok) ok = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    if (!ok) {
+        NSString *reason = [NSString stringWithUTF8String:sqlite3_errmsg(db)] ?: @"unknown error";
+        sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        sqlite3_close(db);
+        return [NSString stringWithFormat:@"Could not add the song to the MediaLibrary DB (%@). "
+            @"File saved to %@/%@.", reason, MUSIC_DIR, filename];
+    }
     sqlite3_close(db);
 
     return [NSString stringWithFormat:

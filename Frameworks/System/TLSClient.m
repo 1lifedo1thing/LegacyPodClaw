@@ -456,13 +456,31 @@ static const NSUInteger kConnMaxQueuedBytes = 512 * 1024;
     });
 }
 
+/* the connection socket is non-blocking, so wait for it to accept more bytes */
+static BOOL ConnWaitWritable(int sock, int events) {
+    struct pollfd pfd = { .fd = sock, .events = (short)events };
+    int rc;
+    do { rc = poll(&pfd, 1, kIOTimeoutSec * 1000); } while (rc < 0 && errno == EINTR);
+    return rc > 0 && !(pfd.revents & (POLLERR | POLLNVAL));
+}
+
 static BOOL ConnWrite(int sock, WOLFSSL *ssl, NSData *data) {
-    if (ssl) return WriteAll(ssl, [data bytes], [data length]);
     const char *p = [data bytes];
     NSUInteger left = [data length];
     while (left > 0) {
+        if (ssl) {
+            int chunk = (int)MIN(left, (NSUInteger)16384);
+            int n = wolfSSL_write(ssl, p, chunk);
+            if (n > 0) { p += n; left -= (NSUInteger)n; continue; }
+            int err = wolfSSL_get_error(ssl, n);
+            /* wolfssl needs the same buffer and length again after a want error */
+            if (err == WOLFSSL_ERROR_WANT_WRITE && ConnWaitWritable(sock, POLLOUT)) continue;
+            if (err == WOLFSSL_ERROR_WANT_READ && ConnWaitWritable(sock, POLLIN)) continue;
+            return NO;
+        }
         ssize_t n = send(sock, p, left, 0);
         if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && errno == EAGAIN && ConnWaitWritable(sock, POLLOUT)) continue;
         if (n <= 0) return NO;
         p += n;
         left -= (NSUInteger)n;
@@ -478,6 +496,8 @@ static BOOL ConnWrite(int sock, WOLFSSL *ssl, NSData *data) {
     if (_useTLS && !SharedContext()) error = TLSError(CPTLSErrorSetup, gContextError ?: @"TLS setup failed");
     if (!error) sock = ConnectSocket(_host, _port, &error);
     if (sock >= 0 && _useTLS) ssl = OpenTLS(sock, _host, &error);
+    /* a blocking wolfSSL_read keeps reading past a tls 1.3 session ticket, so the outbox would wait for server data */
+    if (!error && sock >= 0) fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK);
 
     if (!error && !_closed) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -511,14 +531,25 @@ static BOOL ConnWrite(int sock, WOLFSSL *ssl, NSData *data) {
                 });
                 continue;
             }
-            if (!ssl && n < 0 && errno == EINTR) continue;
+            if (!ssl && n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
             int err = ssl ? wolfSSL_get_error(ssl, n) : 0;
+            /* a post-handshake record with no app data; poll again */
+            if (err == WOLFSSL_ERROR_WANT_READ) continue;
+            if (err == WOLFSSL_ERROR_WANT_WRITE) { ConnWaitWritable(sock, POLLOUT); continue; }
             error = TLSError(CPTLSErrorIO, (n == 0 || err == WOLFSSL_ERROR_ZERO_RETURN || err == SOCKET_PEER_CLOSED_E)
                 ? [NSString stringWithFormat:@"%@ closed the connection", _host]
                 : [NSString stringWithFormat:@"Reading from %@ failed (%d)", _host, err]);
         }
     }
 
+    /* a caller may queue a goodbye (irc QUIT, a websocket close frame) and then close at once */
+    if (!error && sock >= 0) {
+        [_lock lock];
+        NSData *last = [_outbox length] ? [[_outbox copy] autorelease] : nil;
+        [_outbox setLength:0];
+        [_lock unlock];
+        if (last) ConnWrite(sock, ssl, last);
+    }
     if (ssl) { wolfSSL_shutdown(ssl); wolfSSL_free(ssl); }
     if (sock >= 0) close(sock);
     [_lock lock];

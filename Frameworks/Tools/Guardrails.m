@@ -5,6 +5,8 @@
 
 #import "Guardrails.h"
 #import <sys/mount.h>
+#import <sys/param.h>
+#import <stdlib.h>
 
 @implementation OCGuardrailVerdict
 + (OCGuardrailVerdict *)allow {
@@ -37,6 +39,22 @@ static BOOL PathIsUnder(NSString *path, NSString *dir) {
     NSString *bare = [dir hasSuffix:@"/"] ? [dir substringToIndex:[dir length] - 1] : dir;
     return [path isEqualToString:bare] || [path hasPrefix:[bare stringByAppendingString:@"/"]]
         || (![dir hasSuffix:@"/"] && [path hasPrefix:dir]);
+}
+
+/* the kernel resolves ".." after a symlink physically, and nsstring may not, so ask realpath for the longest existing prefix */
+static NSString *PhysicalPath(NSString *path) {
+    NSArray *parts = [path pathComponents];
+    char resolved[PATH_MAX];
+    for (NSUInteger i = [parts count]; i > 0; i--) {
+        NSString *prefix = [NSString pathWithComponents:[parts subarrayWithRange:NSMakeRange(0, i)]];
+        if (!realpath([prefix fileSystemRepresentation], resolved)) continue;
+        NSArray *rest = [parts subarrayWithRange:NSMakeRange(i, [parts count] - i)];
+        /* a dot segment below a missing directory has no physical meaning, so refuse it */
+        if ([rest containsObject:@".."] || [rest containsObject:@"."]) return nil;
+        NSString *base = [NSString stringWithUTF8String:resolved];
+        return [rest count] ? [base stringByAppendingPathComponent:[NSString pathWithComponents:rest]] : base;
+    }
+    return nil;
 }
 
 @implementation OCGuardrails
@@ -91,7 +109,8 @@ static BOOL PathIsUnder(NSString *path, NSString *dir) {
     if (![path isAbsolutePath]) return [OCGuardrailVerdict blockWithReason:@"Path must be absolute"];
 
     /* resolve symlinks and dot segments, then undo the /private prefix so /var and /etc rules still match */
-    NSString *resolved = [[path stringByStandardizingPath] stringByResolvingSymlinksInPath];
+    NSString *resolved = PhysicalPath(path);
+    if (!resolved) return [OCGuardrailVerdict blockWithReason:@"Path cannot be resolved"];
     if ([resolved hasPrefix:@"/private/var/"] || [resolved hasPrefix:@"/private/etc/"] ||
         [resolved isEqualToString:@"/private/var"] || [resolved isEqualToString:@"/private/etc"])
         resolved = [resolved substringFromIndex:[@"/private" length]];

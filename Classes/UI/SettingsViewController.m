@@ -77,10 +77,17 @@ enum {
 }
 
 - (void)_savePrefs {
+    /* clawpodd migrates plist secrets at any time, so keep the file's current secret entries, not our stale copy */
+    NSDictionary *disk = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
+    for (NSString *key in [CPSecretStore allSecretKeys]) {
+        id onDisk = [disk objectForKey:key];
+        if (onDisk) [_prefs setObject:onDisk forKey:key];
+        else [_prefs removeObjectForKey:key];
+    }
     /* the plist holds the api base url, so keep it private to mobile */
     if ([_prefs writeToFile:PREFS_PATH atomically:YES]) chmod([PREFS_PATH fileSystemRepresentation], 0600);
+    /* the app's own prefsChanged listener reloads the settings; a direct call here would reconnect twice */
     notify_post("pro.matthesketh.legacypodclaw/prefsChanged");
-    [[AppDelegate shared] loadConnectionSettings];
 }
 
 - (NSString *)_prefString:(NSString *)key {

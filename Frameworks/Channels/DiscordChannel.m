@@ -195,13 +195,15 @@ static const NSUInteger kDiscordIntents = (1 << 0) | (1 << 9) | (1 << 12) | (1 <
 - (void)sendMessage:(NSString *)text toChatId:(NSString *)chatId threadId:(NSString *)threadId {
     if ([chatId length] == 0 || [text length] == 0) return;
     NSString *url = [NSString stringWithFormat:@"%@/channels/%@/messages", kDiscordAPI, chatId];
-    for (NSString *part in OCSplitText(text, kDiscordMaxChars)) {
+    NSDictionary *headers = [self _headers];
+    OCSendPartsInOrder(OCSplitText(text, kDiscordMaxChars), ^(NSString *part, dispatch_block_t done) {
         /* model output must never ping everyone or a role */
         NSDictionary *body = @{@"content": part, @"allowed_mentions": @{@"parse": @[]}};
-        [CPTLSClient postJSON:url headers:[self _headers] body:body completion:^(NSDictionary *json, NSError *error) {
+        [CPTLSClient postJSON:url headers:headers body:body completion:^(NSDictionary *json, NSError *error) {
             if (error || [json objectForKey:@"code"]) NSLog(@"[Discord] send failed: %@", error ? [error localizedDescription] : [json objectForKey:@"message"]);
+            done();
         }];
-    }
+    });
 }
 
 - (void)sendTypingIndicator:(NSString *)chatId {

@@ -30,6 +30,8 @@ LegacyPodClaw_FILES = \
 	Frameworks/Agent/Agent.m \
 	Frameworks/Server/HTTPServer.m \
 	Frameworks/Server/GatewayServer.m \
+	Frameworks/Server/GatewayToken.m \
+	Frameworks/Server/ServerWebSocket.m \
 	Frameworks/Channels/ChannelManager.m \
 	Frameworks/Channels/TelegramChannel.m \
 	Frameworks/Channels/DiscordChannel.m \

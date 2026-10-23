@@ -31,7 +31,7 @@ typedef void(^CPHTTPSStreamChunk)(NSData *chunk);
             body:(NSDictionary *)jsonBody
       completion:(void(^)(NSDictionary *json, NSError *error))completion;
 
-/* base64 sha-256 spki hashes; pin intermediates or roots, never a leaf that rotates */
+/* base64 sha-256 spki hashes of the leaf key; only the leaf is checked, so pin a key the server keeps across renewals */
 + (void)setPinnedSPKIHashes:(NSArray *)hashes forHost:(NSString *)host;
 
 @end

@@ -19,6 +19,7 @@
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 #import <poll.h>
+#import <spawn.h>
 #import <fcntl.h>
 
 static OCStore *_memoryStore = nil;
@@ -45,40 +46,53 @@ static OCStore *_memoryStore = nil;
 
 #define BASH_OUTPUT_MAX 16384
 
+/* cut at a character boundary, so a split multi-byte sequence does not garble the whole output */
+static NSUInteger Utf8SafeLength(const uint8_t *bytes, NSUInteger length) {
+    NSUInteger i = length;
+    NSUInteger back = 0;
+    while (i > 0 && back < 4 && (bytes[i - 1] & 0xC0) == 0x80) { i--; back++; }
+    if (i == 0) return length;
+    uint8_t lead = bytes[i - 1];
+    NSUInteger need = (lead & 0x80) == 0 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
+    return (back + 1 >= need) ? length : i - 1;
+}
+
 /* every call is confirmed by the user through OCToolDispatcher, so there is no denylist */
 static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
-    /* build every c string before fork, because the child may only call async-signal-safe code */
     const char *ccmd = [cmd UTF8String];
     if (!ccmd) return @{@"output": @"command is not valid utf-8", @"exit": @(-1)};
-    char *cmdCopy = strdup(ccmd);
-    char *args[] = {(char *)"sh", (char *)"-c", cmdCopy, NULL};
-    char *env[] = {(char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin", (char *)"HOME=/var/mobile",
-                   (char *)"USER=mobile", (char *)"TERM=dumb", NULL};
-    rlim_t cpu = (rlim_t)timeout;
 
     int out[2];
-    if (pipe(out) != 0) { free(cmdCopy); return @{@"output": @"pipe failed", @"exit": @(-1)}; }
+    if (pipe(out) != 0) return @{@"output": @"pipe failed", @"exit": @(-1)};
+    fcntl(out[0], F_SETFD, FD_CLOEXEC);
+    fcntl(out[1], F_SETFD, FD_CLOEXEC);
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        struct rlimit lim;
-        lim.rlim_cur = lim.rlim_max = cpu;
-        setrlimit(RLIMIT_CPU, &lim);
-        lim.rlim_cur = lim.rlim_max = 16 * 1024 * 1024;
-        setrlimit(RLIMIT_FSIZE, &lim);
-        dup2(out[1], STDOUT_FILENO);
-        dup2(out[1], STDERR_FILENO);
-        close(out[0]);
-        close(out[1]);
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
-        setpgid(0, 0);
-        execve("/bin/sh", args, env);
-        _exit(127);
-    }
-    free(cmdCopy);
+    /* cloexec-default closes every app descriptor (sockets, sqlite) in the child */
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&actions, out[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, out[1], STDERR_FILENO);
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attr, 0);
+
+    /* limits are set by the shell, because posix_spawn cannot set rlimits */
+    char limits[96];
+    snprintf(limits, sizeof(limits), "ulimit -t %d 2>/dev/null; ulimit -f 32768 2>/dev/null; eval \"$1\"", (int)timeout);
+    char *args[] = {(char *)"sh", (char *)"-c", limits, (char *)"sh", (char *)ccmd, NULL};
+    char *env[] = {(char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin", (char *)"HOME=/var/mobile",
+                   (char *)"USER=mobile", (char *)"TERM=dumb", NULL};
+    pid_t pid = -1;
+    int spawnErr = posix_spawn(&pid, "/bin/sh", &actions, &attr, args, env);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
     close(out[1]);
-    if (pid < 0) { close(out[0]); return @{@"output": @"fork failed", @"exit": @(-1)}; }
+    if (spawnErr != 0) {
+        close(out[0]);
+        return @{@"output": [NSString stringWithFormat:@"could not start /bin/sh: %s", strerror(spawnErr)], @"exit": @(-1)};
+    }
 
     NSMutableData *data = [NSMutableData data];
     BOOL truncated = NO, timedOut = NO;
@@ -100,11 +114,21 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
     }
     close(out[0]);
 
-    /* the command ran in its own process group, so this also stops its children */
-    if (timedOut) { kill(-pid, SIGTERM); usleep(200000); kill(-pid, SIGKILL); }
+    /* the shell may close its output and keep running, so wait with the same deadline */
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    pid_t done = 0;
+    while (!timedOut && (done = waitpid(pid, &status, WNOHANG)) == 0) {
+        if ([deadline timeIntervalSinceNow] <= 0) { timedOut = YES; break; }
+        usleep(50000);
+    }
+    if (timedOut || done < 0) {
+        kill(-pid, SIGTERM);
+        usleep(200000);
+        kill(-pid, SIGKILL);
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
 
+    if (truncated) [data setLength:Utf8SafeLength([data bytes], [data length])];
     NSString *output = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]
         ?: [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
     if (truncated) output = [output stringByAppendingString:@"\n[output truncated]"];

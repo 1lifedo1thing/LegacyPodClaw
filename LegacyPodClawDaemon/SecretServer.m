@@ -4,6 +4,11 @@
  *
  * Only clawpodd carries the keychain access group, so only it can read the
  * items. It checks each caller's executable path from the mach audit trailer.
+ *
+ * The path check is defence in depth, not a boundary: on a jailbroken device
+ * code can still get into an allowed process (a tweak inside springboard, or
+ * a process that queues a request and then execs an allowed binary). The app
+ * binary carries a __RESTRICT segment so dyld ignores DYLD_INSERT_LIBRARIES.
  */
 
 #import "SecretServer.h"
@@ -107,6 +112,8 @@ typedef NS_ENUM(NSInteger, CPCaller) { CPCallerUnknown, CPCallerSpringBoard, CPC
 static CPCaller CallerForAuditToken(audit_token_t token) {
     /* val[5] is the pid in the bsm audit token layout */
     int pid = (int)token.val[5];
+    /* val[1] is the effective uid; springboard, settings and the app all run as mobile */
+    if (token.val[1] != 501) return CPCallerUnknown;
     char path[CP_PROC_PATH_MAX];
     if (pid <= 0 || proc_pidpath(pid, path, sizeof(path)) <= 0) return CPCallerUnknown;
     if (strcmp(path, CALLER_SPRINGBOARD) == 0) return CPCallerSpringBoard;

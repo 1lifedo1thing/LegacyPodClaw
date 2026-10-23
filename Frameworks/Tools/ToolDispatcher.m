@@ -11,6 +11,8 @@
 #define CONFIRM_TIMEOUT 60.0
 #define RESULT_MAX_CHARS 16384
 #define SUMMARY_MAX_CHARS 400
+/* a key field longer than this cannot be shown in an alert, so the call is refused */
+#define KEY_FIELD_MAX_CHARS 1500
 
 static NSString *const OCToolErrorDomain = @"OCToolDispatcher";
 
@@ -132,6 +134,43 @@ static BOOL PathCheckForTool(NSString *name, OCFileOp *op) {
     return YES;
 }
 
+/* fields that decide what a call does; the user must see them whole */
+static NSArray *KeyFields(void) {
+    return @[@"command", @"path", @"url", @"to", @"recipient", @"bundle_id", @"query"];
+}
+
+/* make spaces, tabs and line breaks visible, so padding cannot hide the rest of a command */
+static NSString *Visible(NSString *value) {
+    NSMutableString *out = [NSMutableString stringWithCapacity:[value length]];
+    NSUInteger spaces = 0;
+    for (NSUInteger i = 0; i < [value length]; i++) {
+        unichar c = [value characterAtIndex:i];
+        if (c == ' ') { spaces++; continue; }
+        if (spaces > 1) [out appendFormat:@"[%lu spaces]", (unsigned long)spaces];
+        else if (spaces == 1) [out appendString:@" "];
+        spaces = 0;
+        if (c == '\n') [out appendString:@"⏎\n"];
+        else if (c == '\t') [out appendString:@"[tab]"];
+        else if (c < 0x20 || c == 0x7f) [out appendFormat:@"[0x%02x]", c];
+        else [out appendFormat:@"%C", c];
+    }
+    if (spaces > 1) [out appendFormat:@"[%lu spaces]", (unsigned long)spaces];
+    else if (spaces == 1) [out appendString:@"[space]"];
+    return out;
+}
+
+static NSString *KeyFieldsText(NSDictionary *input, BOOL *tooLong) {
+    NSMutableString *text = [NSMutableString string];
+    for (NSString *key in KeyFields()) {
+        id value = [input objectForKey:key];
+        if (!value) continue;
+        NSString *str = [value isKindOfClass:[NSString class]] ? value : [value description];
+        if ([str length] > KEY_FIELD_MAX_CHARS) { *tooLong = YES; return nil; }
+        [text appendFormat:@"%@: %@\n", key, Visible(str)];
+    }
+    return text;
+}
+
 static NSString *InputSummary(NSDictionary *input) {
     NSData *json = [NSJSONSerialization dataWithJSONObject:input options:0 error:nil];
     NSString *s = json ? [[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] autorelease] : @"{}";
@@ -189,13 +228,24 @@ static NSString *CallerText(OCToolCaller caller) {
                                                     forOperation:op];
         if (v.action == OCGuardrailBlock) { completion(nil, ToolError(v.reason)); return; }
         if (v.action == OCGuardrailConfirm) { confirm = YES; reason = v.reason; }
+        /* a remote client could read files and send them out with a web tool, so it always asks */
+        if (caller == OCToolCallerRemote) confirm = YES;
     }
 
     void (^run)(void) = ^{ [self _invoke:tool input:input completion:completion]; };
     if (!confirm) { run(); return; }
 
+    BOOL tooLong = NO;
+    NSString *keyText = KeyFieldsText(input, &tooLong);
+    if (tooLong) {
+        completion(nil, ToolError(@"a command or path is too long to show for approval, so the call was refused"));
+        return;
+    }
+    NSMutableDictionary *rest = [[input mutableCopy] autorelease];
+    [rest removeObjectsForKeys:KeyFields()];
     NSMutableString *message = [NSMutableString stringWithFormat:@"%@ wants to run \"%@\".\n\n%@",
-                                CallerText(caller), tool.name, InputSummary(input)];
+                                CallerText(caller), tool.name, keyText];
+    if ([rest count]) [message appendFormat:@"\nOther input: %@", InputSummary(rest)];
     if (reason) [message appendFormat:@"\n\n%@", reason];
     _OCToolConfirmation *c = [[_OCToolConfirmation alloc] initWithTitle:@"Allow Tool?" message:message
         decision:^(BOOL allowed) {
@@ -221,7 +271,7 @@ static NSString *CallerText(OCToolCaller caller) {
     NSTimeInterval timeout = tool.timeout > 0 ? tool.timeout : TOOL_DEFAULT_TIMEOUT;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        finish(nil, ToolError([NSString stringWithFormat:@"tool timed out after %.0f s", timeout]));
+        finish(nil, ToolError([NSString stringWithFormat:@"tool timed out after %.0f s; it may still complete", timeout]));
     });
 
     @try {

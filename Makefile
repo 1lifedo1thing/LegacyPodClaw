@@ -90,7 +90,8 @@ LegacyPodClaw_FRAMEWORKS = UIKit Foundation Security CoreGraphics QuartzCore Aud
 LegacyPodClaw_LIBRARIES = sqlite3
 
 LegacyPodClaw_CFLAGS += -Os -ffast-math -fvisibility=hidden -fvisibility-inlines-hidden
-LegacyPodClaw_LDFLAGS = -dead_strip -ldl
+# the __RESTRICT segment makes dyld ignore DYLD_INSERT_LIBRARIES, which clawpodd relies on
+LegacyPodClaw_LDFLAGS = -dead_strip -ldl -Wl,-sectcreate,__RESTRICT,__restrict,/dev/null
 LegacyPodClaw_OBJ_FILES += $(THEOS_PROJECT_DIR)/Vendor/libwolfssl.a
 
 LegacyPodClaw_RESOURCE_DIRS = Resources

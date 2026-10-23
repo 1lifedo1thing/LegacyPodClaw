@@ -9,6 +9,7 @@
 #import <fcntl.h>
 #import <poll.h>
 #import <errno.h>
+#import <ctype.h>
 #import <unistd.h>
 
 #include <wolfssl/wolfcrypt/settings.h>
@@ -25,6 +26,8 @@ static NSString *const kCABundlePath = @"/Applications/LegacyPodClaw.app/cacert.
 
 static const int kConnectTimeoutMs = 15000;
 static const int kIOTimeoutSec = 120;          /* streamed replies can idle while the model thinks */
+static const NSTimeInterval kConnectBudgetSec = 30;   /* all addresses together, not 15 s each */
+static const NSTimeInterval kRequestBudgetSec = 600;  /* a trickling server must not hold the thread forever */
 static const NSUInteger kMaxHeaderBytes = 64 * 1024;
 static const NSUInteger kMaxBodyBytes = 24 * 1024 * 1024;
 
@@ -85,7 +88,10 @@ static int ConnectSocket(NSString *host, int port, NSError **error) {
     }
 
     int sock = -1;
+    NSDate *connectDeadline = [NSDate dateWithTimeIntervalSinceNow:kConnectBudgetSec];
     for (struct addrinfo *ai = res; ai && sock < 0; ai = ai->ai_next) {
+        int budgetMs = (int)([connectDeadline timeIntervalSinceNow] * 1000);
+        if (budgetMs <= 0) break;
         int s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (s < 0) continue;
 
@@ -99,7 +105,7 @@ static int ConnectSocket(NSString *host, int port, NSError **error) {
             struct pollfd pfd = { .fd = s, .events = POLLOUT };
             int soErr = 0;
             socklen_t len = sizeof(soErr);
-            if (poll(&pfd, 1, kConnectTimeoutMs) == 1 &&
+            if (poll(&pfd, 1, MIN(kConnectTimeoutMs, budgetMs)) == 1 &&
                 getsockopt(s, SOL_SOCKET, SO_ERROR, &soErr, &len) == 0 && soErr == 0) {
                 rc = 0;
             }
@@ -242,6 +248,11 @@ static BOOL HasLineBreak(NSString *s) {
         if ([name isEqualToString:@"transfer-encoding"]) {
             _chunked = [[value lowercaseString] rangeOfString:@"chunked"].location != NSNotFound;
         } else if ([name isEqualToString:@"content-length"]) {
+            NSCharacterSet *nonDigits = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+            if ([value length] == 0 || [value length] > 18 || [value rangeOfCharacterFromSet:nonDigits].location != NSNotFound) {
+                [self fail:CPTLSErrorProtocol message:@"Malformed Content-Length"];
+                return;
+            }
             _contentLength = [value longLongValue];
         }
     }
@@ -263,11 +274,20 @@ static BOOL HasLineBreak(NSString *s) {
                 if (len > 1024) [self fail:CPTLSErrorProtocol message:@"Malformed chunk header"];
                 return;
             }
-            char hex[20] = {0};
-            memcpy(hex, p, MIN(eol, sizeof(hex) - 1));
-            char *end = NULL;
-            _chunkRemain = strtoull(hex, &end, 16);
-            if (end == hex) { [self fail:CPTLSErrorProtocol message:@"Malformed chunk size"]; return; }
+            /* hex digits, then an optional ;extension; anything else is a framing error */
+            unsigned long long size = 0;
+            NSUInteger digits = 0;
+            while (digits < eol && isxdigit(p[digits])) {
+                int c = p[digits];
+                size = size * 16 + (unsigned long long)(isdigit(c) ? c - '0' : (tolower(c) - 'a' + 10));
+                if (++digits > 15) break;
+            }
+            BOOL validTail = digits == eol || (digits < eol && (p[digits] == ';' || p[digits] == ' ' || p[digits] == '\t'));
+            if (digits == 0 || digits > 15 || !validTail) {
+                [self fail:CPTLSErrorProtocol message:@"Malformed chunk size"];
+                return;
+            }
+            _chunkRemain = size;
             [_pending replaceBytesInRange:NSMakeRange(0, eol + 2) withBytes:NULL length:0];
             if (_chunkRemain == 0) { complete = YES; return; }
             _needChunkSize = NO;
@@ -278,6 +298,7 @@ static BOOL HasLineBreak(NSString *s) {
             _chunkRemain -= take;
         } else {
             if (len < 2) return;
+            if (p[0] != '\r' || p[1] != '\n') { [self fail:CPTLSErrorProtocol message:@"Missing CRLF after chunk"]; return; }
             [_pending replaceBytesInRange:NSMakeRange(0, 2) withBytes:NULL length:0];
             _needChunkSize = YES;
         }
@@ -306,8 +327,15 @@ static BOOL HasLineBreak(NSString *s) {
         NSString *head = [[NSString alloc] initWithBytes:p length:end encoding:NSISOLatin1StringEncoding];
         [self parseHeaders:head];
         [head release];
-        headersDone = YES;
         [_pending replaceBytesInRange:NSMakeRange(0, end + 4) withBytes:NULL length:0];
+        if (complete && error) return;
+        if (statusCode >= 100 && statusCode < 200) {
+            /* an interim 1xx response; the real one follows on the same connection */
+            statusCode = 0; _chunked = NO; _contentLength = -1; complete = NO;
+            [self feed:"" length:0];
+            return;
+        }
+        headersDone = YES;
         if (complete) return;
 
         if (!_chunked) {
@@ -407,8 +435,12 @@ static BOOL HasLineBreak(NSString *s) {
     wolfSSL_set_fd(ssl, sock);
 
     const char *hostC = [host UTF8String];
-    wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, hostC, (unsigned short)strlen(hostC));
-    wolfSSL_check_domain_name(ssl, hostC);
+    if (wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, hostC, (unsigned short)strlen(hostC)) != WOLFSSL_SUCCESS ||
+        wolfSSL_check_domain_name(ssl, hostC) != WOLFSSL_SUCCESS) {
+        /* without the name check the handshake would accept any valid certificate */
+        *outError = TLSError(CPTLSErrorSetup, @"Could not set the TLS host name");
+        goto cleanup;
+    }
 
     int connected = wolfSSL_connect(ssl);
     if (connected != WOLFSSL_SUCCESS) {
@@ -428,14 +460,23 @@ static BOOL HasLineBreak(NSString *s) {
     }
 
     {
-        NSString *path = [url path];
+        /* the raw path keeps percent escapes and trailing slashes that -[NSURL path] removes */
+        NSString *path = [(NSString *)CFURLCopyPath((CFURLRef)url) autorelease];
         if ([path length] == 0) path = @"/";
-        NSString *query = [url query];
+        NSString *query = [(NSString *)CFURLCopyQueryString((CFURLRef)url, NULL) autorelease];
         NSString *target = query ? [NSString stringWithFormat:@"%@?%@", path, query] : path;
+        NSCharacterSet *badTarget = [NSCharacterSet characterSetWithCharactersInString:@" \t\r\n"];
+        NSCharacterSet *notToken = [[NSCharacterSet uppercaseLetterCharacterSet] invertedSet];
+        NSString *verb = method ?: @"GET";
+        if ([target rangeOfCharacterFromSet:badTarget].location != NSNotFound ||
+            [verb length] == 0 || [verb rangeOfCharacterFromSet:notToken].location != NSNotFound) {
+            *outError = TLSError(CPTLSErrorProtocol, @"Invalid request method or path");
+            goto cleanup;
+        }
         NSString *hostHeader = [url port] ? [NSString stringWithFormat:@"%@:%d", host, port] : host;
 
         NSMutableString *head = [NSMutableString stringWithFormat:@"%@ %@ HTTP/1.1\r\nHost: %@\r\nConnection: close\r\n",
-                                 method ?: @"GET", target, hostHeader];
+                                 verb, target, hostHeader];
         if (body) [head appendFormat:@"Content-Length: %lu\r\n", (unsigned long)[body length]];
         for (NSString *key in headers) {
             [head appendFormat:@"%@: %@\r\n", key, [headers objectForKey:key]];
@@ -451,7 +492,12 @@ static BOOL HasLineBreak(NSString *s) {
 
         CPHTTPResponseParser *parser = [[[CPHTTPResponseParser alloc] initWithChunkHandler:onChunk] autorelease];
         char buf[8192];
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kRequestBudgetSec];
         while (!parser->complete) {
+            if ([deadline timeIntervalSinceNow] <= 0) {
+                *outError = TLSError(CPTLSErrorIO, [NSString stringWithFormat:@"%@ took longer than %.0f s", host, kRequestBudgetSec]);
+                break;
+            }
             int n = wolfSSL_read(ssl, buf, sizeof(buf));
             if (n > 0) {
                 [parser feed:buf length:(NSUInteger)n];
@@ -482,9 +528,14 @@ cleanup:
             body:(NSDictionary *)jsonBody
       completion:(void(^)(NSDictionary *, NSError *))completion {
 
-    NSError *encodeError = nil;
-    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:jsonBody options:0 error:&encodeError];
-    if (!bodyData) { completion(nil, encodeError); return; }
+    /* dataWithJSONObject: throws on invalid input instead of returning nil */
+    NSData *bodyData = [NSJSONSerialization isValidJSONObject:jsonBody]
+        ? [NSJSONSerialization dataWithJSONObject:jsonBody options:0 error:NULL] : nil;
+    if (!bodyData) {
+        NSError *encodeError = TLSError(CPTLSErrorProtocol, @"Request body is not valid JSON");
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, encodeError); });
+        return;
+    }
 
     NSMutableDictionary *hdrs = [NSMutableDictionary dictionaryWithDictionary:headers ?: @{}];
     [hdrs setObject:@"application/json" forKey:@"Content-Type"];

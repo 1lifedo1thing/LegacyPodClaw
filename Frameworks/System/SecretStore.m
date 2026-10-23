@@ -54,8 +54,14 @@ static int32_t SendSecretRequest(uint32_t op, NSString *key, NSData *value, NSSt
                                 sizeof(CPSecretRequest), sizeof(msg), replyPort,
                                 CP_SECRET_TIMEOUT_MS, MACH_PORT_NULL);
 
+    /* a failed send hands the message and its port rights back to us */
+    if (kr == MACH_SEND_TIMED_OUT || kr == MACH_SEND_INTERRUPTED || kr == MACH_SEND_INVALID_DEST)
+        mach_msg_destroy(&msg.request.header);
+
     int32_t status = CPSecretStatusUnavailable;
     if (kr == KERN_SUCCESS && msg.in.reply.header.msgh_size == sizeof(CPSecretReply)
+        && msg.in.reply.header.msgh_id == CP_SECRET_MSG_ID + 100
+        && !(msg.in.reply.header.msgh_bits & MACH_MSGH_BITS_COMPLEX)
         && msg.in.reply.valueLength <= CP_SECRET_VALUE_MAX) {
         status = msg.in.reply.status;
         if (status == CPSecretStatusOK && outValue && msg.in.reply.valueLength > 0) {

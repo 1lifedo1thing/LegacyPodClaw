@@ -32,6 +32,13 @@ static NSArray *_secretPaths = nil;
 }
 @end
 
+/* "/var/Keychains" itself must match the "/var/Keychains/" rule, not only paths below it */
+static BOOL PathIsUnder(NSString *path, NSString *dir) {
+    NSString *bare = [dir hasSuffix:@"/"] ? [dir substringToIndex:[dir length] - 1] : dir;
+    return [path isEqualToString:bare] || [path hasPrefix:[bare stringByAppendingString:@"/"]]
+        || (![dir hasSuffix:@"/"] && [path hasPrefix:dir]);
+}
+
 @implementation OCGuardrails
 
 + (void)initialize {
@@ -49,7 +56,10 @@ static NSArray *_secretPaths = nil;
 
     _secretPaths = [@[
         @"/var/Keychains/", @"/var/mobile/Library/Mail/",
-        @"/var/db/", @"/var/mobile/Library/Accounts/"
+        @"/var/db/", @"/var/mobile/Library/Accounts/",
+        @"/var/mobile/Library/SMS/", @"/var/mobile/Library/AddressBook/",
+        @"/var/mobile/Library/Cookies/", @"/var/mobile/Library/Safari/",
+        @"/var/mobile/Library/CallHistory/", @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
     ] retain];
 }
 
@@ -82,13 +92,14 @@ static NSArray *_secretPaths = nil;
 
     /* resolve symlinks and dot segments, then undo the /private prefix so /var and /etc rules still match */
     NSString *resolved = [[path stringByStandardizingPath] stringByResolvingSymlinksInPath];
-    if ([resolved hasPrefix:@"/private/var/"] || [resolved hasPrefix:@"/private/etc/"])
+    if ([resolved hasPrefix:@"/private/var/"] || [resolved hasPrefix:@"/private/etc/"] ||
+        [resolved isEqualToString:@"/private/var"] || [resolved isEqualToString:@"/private/etc"])
         resolved = [resolved substringFromIndex:[@"/private" length]];
 
     /* Read-only operations are more permissive */
     if (op == OCFileOpRead) {
         for (NSString *secret in _secretPaths) {
-            if ([resolved hasPrefix:secret])
+            if (PathIsUnder(resolved, secret))
                 return [OCGuardrailVerdict blockWithReason:
                     [NSString stringWithFormat:@"Access denied: %@ contains sensitive data", secret]];
         }
@@ -97,13 +108,13 @@ static NSArray *_secretPaths = nil;
 
     /* Write/edit/delete operations */
     for (NSString *blocked in _hardBlockPaths) {
-        if ([resolved hasPrefix:blocked])
+        if (PathIsUnder(resolved, blocked))
             return [OCGuardrailVerdict blockWithReason:
                 [NSString stringWithFormat:@"BLOCKED: Cannot modify %@ (system-critical path)", blocked]];
     }
 
     for (NSString *confirm in _confirmPaths) {
-        if ([resolved hasPrefix:confirm])
+        if (PathIsUnder(resolved, confirm))
             return [OCGuardrailVerdict confirmWithReason:
                 [NSString stringWithFormat:@"Modifying %@ requires confirmation", resolved]];
     }

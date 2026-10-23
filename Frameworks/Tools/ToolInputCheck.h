@@ -10,6 +10,9 @@
 /* a key field longer than this cannot be shown in an alert, so the call is refused */
 #define OC_TOOL_KEY_FIELD_MAX 1500
 
+/* other input longer than this shows its start and end and says how much is hidden */
+#define OC_TOOL_OTHER_FIELD_SHOWN 900
+
 /* nil when the input fits the json schema's required keys and property types */
 NSString *OCToolSchemaProblem(NSDictionary *schema, NSDictionary *input);
 
@@ -21,6 +24,12 @@ NSString *OCToolVisibleText(NSString *value);
 
 /* the approval fields as alert text; sets *tooLong and returns nil when one cannot be shown */
 NSString *OCToolApprovalText(NSDictionary *input, BOOL *tooLong);
+
+/* every other input field as alert text, made visible and cut with a note when long */
+NSString *OCToolOtherInputText(NSDictionary *rest);
+
+/* yes when the calculate tool may give the text to nsexpression */
+BOOL OCMathExpressionIsSafe(NSString *expression);
 
 /* the largest length <= length that does not end inside a utf-8 sequence */
 NSUInteger OCUtf8SafeLength(const uint8_t *bytes, NSUInteger length);

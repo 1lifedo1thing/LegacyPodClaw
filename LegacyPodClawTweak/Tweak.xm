@@ -1181,6 +1181,15 @@ static void CPUnlockAndShow(id away) {
             }
         });
 
+    /* CPShow checks the lock only on open, so hide the panel when the device locks with it showing */
+    int lockToken;
+    notify_register_dispatch("com.apple.springboard.lockcomplete", &lockToken,
+        dispatch_get_main_queue(), ^(int t) {
+            if (!_cpWindow) return;
+            if (_cpPanel.isVisible) [_cpPanel dismiss];
+            _cpWindow.hidden = YES;
+        });
+
     /* Listen for banner requests */
     int bannerToken;
     notify_register_dispatch("pro.matthesketh.legacypodclaw/showBanner", &bannerToken,

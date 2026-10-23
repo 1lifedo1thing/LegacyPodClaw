@@ -218,6 +218,9 @@ static const CGFloat kTypingCellHeight = 40.0f;
         }
     }
 
+    /* the local agent runs one turn at a time; keep the text so the user can send it after the reply */
+    if (gwState != OCGatewayStateConnected && app.localAgent.isProcessing) return;
+
     _inputTextView.text = @"";
     _sendButton.enabled = NO;
     [self _updateInputBarHeight];

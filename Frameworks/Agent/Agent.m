@@ -9,6 +9,7 @@
 #import "Agent.h"
 #import "HTTPFetch.h"
 #import "ToolDispatcher.h"
+#import "ToolInputCheck.h"
 #import "ProviderRegistry.h"
 #import <UIKit/UIKit.h>
 
@@ -549,6 +550,9 @@ static const NSUInteger kMaxToolRounds = 8;
         } else if ([action isEqualToString:@"write"]) {
             [[UIPasteboard generalPasteboard] setString:[params objectForKey:@"text"] ?: @""];
             callback(@"Copied to clipboard", nil);
+        } else {
+            callback(nil, [NSError errorWithDomain:@"OCAgent" code:1
+                userInfo:@{NSLocalizedDescriptionKey: @"action must be read or write"}]);
         }
     };
     return tool;
@@ -622,6 +626,11 @@ static const NSUInteger kMaxToolRounds = 8;
     };
     tool.handler = ^(NSDictionary *params, OCToolResultBlock callback) {
         NSString *expr = [params objectForKey:@"expression"];
+        if (!OCMathExpressionIsSafe(expr)) {
+            callback(nil, [NSError errorWithDomain:@"OCAgent" code:1
+                userInfo:@{NSLocalizedDescriptionKey: @"use only numbers, + - * / ( ) and spaces"}]);
+            return;
+        }
         @try {
             NSExpression *mathExpr = [NSExpression expressionWithFormat:expr];
             id result = [mathExpr expressionValueWithObject:nil context:nil];

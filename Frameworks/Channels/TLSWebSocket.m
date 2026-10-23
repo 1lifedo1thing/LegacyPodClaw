@@ -103,8 +103,11 @@ static NSError *WSError(NSString *message) {
     [_expectedAccept release];
     _expectedAccept = [WSBase64([NSData dataWithBytes:sha length:sizeof(sha)]) retain];
 
-    NSString *path = [[_url path] length] ? [_url path] : @"/";
-    if ([_url query]) path = [NSString stringWithFormat:@"%@?%@", path, [_url query]];
+    /* raw path and query: -path drops a trailing slash and decodes escapes, which changes the request */
+    NSString *rawPath = [(NSString *)CFURLCopyPath((CFURLRef)_url) autorelease];
+    NSString *rawQuery = [(NSString *)CFURLCopyQueryString((CFURLRef)_url, NULL) autorelease];
+    NSString *path = [rawPath length] ? rawPath : @"/";
+    if (rawQuery) path = [NSString stringWithFormat:@"%@?%@", path, rawQuery];
     NSString *host = [_url port] ? [NSString stringWithFormat:@"%@:%@", [_url host], [_url port]] : [_url host];
     NSString *req = [NSString stringWithFormat:
         @"GET %@ HTTP/1.1\r\nHost: %@\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"

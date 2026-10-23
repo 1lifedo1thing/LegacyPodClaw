@@ -119,6 +119,16 @@ NSString *OCStripMarkdown(NSString *md) {
     return [lines componentsJoinedByString:@"\n"];
 }
 
+static void SendPartFrom(NSArray *parts, NSUInteger index, OCPartSender send) {
+    if (index >= [parts count]) return;
+    send([parts objectAtIndex:index], ^{ SendPartFrom(parts, index + 1, send); });
+}
+
+void OCSendPartsInOrder(NSArray *parts, OCPartSender send) {
+    /* each request opens its own connection, so parts sent together can arrive in any order */
+    SendPartFrom(parts, 0, [[send copy] autorelease]);
+}
+
 NSArray *OCSplitText(NSString *text, NSUInteger maxChars) {
     NSMutableArray *parts = [NSMutableArray array];
     if (maxChars == 0) maxChars = 1;

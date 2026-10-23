@@ -84,6 +84,8 @@ static NSString *const kServiceDomain = @"local.";
     for (NSUInteger i = 0; i < [_gateways count]; i++) {
         OCDiscoveredGateway *gw = [_gateways objectAtIndex:i];
         if ([gw.name isEqualToString:[service name]]) {
+            /* the array holds the only reference, and the block below runs later */
+            [[gw retain] autorelease];
             [_gateways removeObjectAtIndex:i];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [_delegate connectionService:self didRemoveGateway:gw];
@@ -184,6 +186,12 @@ static NSString *const kServiceDomain = @"local.";
     const char *input = [base64 UTF8String];
     NSUInteger inputLen = strlen(input);
     if (inputLen % 4 != 0) return nil;
+    /* a setup code is pasted text; refuse any byte the table does not cover before indexing it */
+    for (NSUInteger i = 0; i < inputLen; i++) {
+        unsigned char ch = (unsigned char)input[i];
+        if (ch == '=' && i >= inputLen - 2) continue;
+        if (ch >= 128 || decodingTable[ch] < 0) return nil;
+    }
 
     NSUInteger outputLen = (inputLen / 4) * 3;
     if (inputLen > 0 && input[inputLen - 1] == '=') outputLen--;
@@ -194,10 +202,10 @@ static NSString *const kServiceDomain = @"local.";
     NSUInteger outIdx = 0;
 
     for (NSUInteger i = 0; i < inputLen; i += 4) {
-        uint8_t a = decodingTable[(int)input[i]];
-        uint8_t b = decodingTable[(int)input[i+1]];
-        uint8_t c = (i+2 < inputLen && input[i+2] != '=') ? decodingTable[(int)input[i+2]] : 0;
-        uint8_t d = (i+3 < inputLen && input[i+3] != '=') ? decodingTable[(int)input[i+3]] : 0;
+        uint8_t a = decodingTable[(unsigned char)input[i]];
+        uint8_t b = decodingTable[(unsigned char)input[i+1]];
+        uint8_t c = (i+2 < inputLen && input[i+2] != '=') ? decodingTable[(unsigned char)input[i+2]] : 0;
+        uint8_t d = (i+3 < inputLen && input[i+3] != '=') ? decodingTable[(unsigned char)input[i+3]] : 0;
 
         if (outIdx < outputLen) outBytes[outIdx++] = (a << 2) | (b >> 4);
         if (outIdx < outputLen) outBytes[outIdx++] = (b << 4) | (c >> 2);

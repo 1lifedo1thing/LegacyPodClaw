@@ -30,7 +30,12 @@ iOS 6 replacement:
 | `base64EncodedStringWithOptions:`, `initWithBase64EncodedString:options:` | iOS 7 | a static helper like `OCBase64Encode` in `Frameworks/WebSocket/WebSocket.m` |
 | `dateByAddingUnit:value:toDate:options:` | iOS 8 | `dateByAddingComponents:toDate:options:` with `NSDateComponents` |
 | `NSCalendarUnitMinute` and other `NSCalendarUnit*` names | iOS 8 | `NSMinuteCalendarUnit` and the other old names |
-| `containsString:` | iOS 8 | `rangeOfString:` and check `location != NSNotFound` |
+| `containsString:`, `localizedCaseInsensitiveContainsString:` | iOS 8 | `rangeOfString:` (with `NSCaseInsensitiveSearch`) and check `location != NSNotFound` |
+| `-[NSScanner scanUnsignedLongLong:]` | iOS 7 | `scanLongLong:`, or `strtoull` on a digit string you checked |
+| `localizedStandardContainsString:`, `localizedStandardRangeOfString:` | iOS 9 | `rangeOfString:options:` with `NSCaseInsensitiveSearch \| NSDiacriticInsensitiveSearch` |
+| `localizedUppercaseString`, `localizedLowercaseString`, `localizedCapitalizedString` | iOS 9 | `uppercaseString`, `lowercaseString`, `capitalizedString` |
+| `stringByApplyingTransform:reverse:`, `applyTransform:reverse:range:updatedRange:`, `NSStringTransform*` | iOS 9 | `CFStringTransform` |
+| `+stringEncodingForData:encodingOptions:convertedString:usedLossyConversion:` | iOS 8 | try `initWithData:encoding:` with each candidate encoding |
 | `stringByAddingPercentEncodingWithAllowedCharacters:` | iOS 7 | `CFURLCreateStringByAddingPercentEscapes` |
 | `NSURLComponents`, `NSURLQueryItem` | iOS 7, iOS 8 | build the query string by hand |
 | `UIAlertController` | iOS 8 | `UIAlertView`, `UIActionSheet` |

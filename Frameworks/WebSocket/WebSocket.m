@@ -797,8 +797,10 @@ static NSString *NormalizedHex(NSString *s) {
             }
 
             if (!_sentClose) {
-                /* Echo close frame back */
-                [self closeWithCode:code reason:reason];
+                /* rfc 6455 5.5.1: echo the status code now; closeWithCode: is async and would run after the teardown below */
+                NSData *echo = [payload length] >= 2 ? [payload subdataWithRange:NSMakeRange(0, 2)] : [NSData data];
+                [self _sendFrameWithOpcode:OCWSOpcClose payload:echo];
+                _sentClose = YES;
             }
 
             [self _teardownWithCode:code reason:reason wasClean:YES];

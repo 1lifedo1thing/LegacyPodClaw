@@ -302,7 +302,14 @@ enum {
             [self _failWithCode:1003 reason:@"binary frames not supported"];
             return NO;
         case kOpClose:
-            [self closeWithCode:1000 reason:nil];
+            /* rfc 6455 5.5.1: echo the peer's status code; a close with no code gets a close with no code */
+            if ([payload length] >= 2) {
+                const uint8_t *b = [payload bytes];
+                [self closeWithCode:(uint16_t)((b[0] << 8) | b[1]) reason:nil];
+            } else {
+                [self _sendFrame:kOpClose payload:[NSData data]];
+                [self _beginClosing];
+            }
             return NO;
         case kOpPing:
             [self _sendFrame:kOpPong payload:payload];

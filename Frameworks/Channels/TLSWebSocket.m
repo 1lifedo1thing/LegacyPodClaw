@@ -76,7 +76,9 @@ static NSError *WSError(NSString *message) {
 
 - (void)close {
     if (_closed) return;
-    if (_handshakeDone) [self _sendFrame:0x8 payload:[NSData data]];
+    /* rfc 6455 5.5.1: a close frame carries a status code; 1000 is a normal close */
+    static const uint8_t normal[2] = { 0x03, 0xE8 };
+    if (_handshakeDone) [self _sendFrame:0x8 payload:[NSData dataWithBytes:normal length:2]];
     _closed = YES;
     _delegate = nil;
     [_conn close];
@@ -203,6 +205,8 @@ static NSError *WSError(NSString *message) {
         case 0x9: [self _sendFrame:0xA payload:payload]; return;
         case 0xA: return;
         case 0x8: {
+            /* rfc 6455 5.5.1: answer a close frame with a close frame that echoes its status code */
+            [self _sendFrame:0x8 payload:[payload length] >= 2 ? [payload subdataWithRange:NSMakeRange(0, 2)] : [NSData data]];
             /* the close code tells a fatal error (a bad token) from a request to reconnect */
             if ([payload length] < 2) { [self _failWith:WSError(@"Websocket closed by server")]; return; }
             const uint8_t *b = [payload bytes];

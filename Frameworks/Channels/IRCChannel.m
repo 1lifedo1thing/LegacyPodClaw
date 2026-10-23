@@ -255,7 +255,8 @@ static const NSTimeInterval kIRCLineInterval = 1.0;
 }
 
 - (NSDictionary *)statusInfo {
-    return @{@"server": _server ?: @"", @"nick": _currentNick ?: @"", @"lastError": _lastError ?: @""};
+    return @{@"server": _server ?: @"", @"nick": _currentNick ?: @"",
+             @"state": _running ? (_registered ? @"connected" : @"connecting") : @"stopped", @"lastError": _lastError ?: @""};
 }
 
 @end

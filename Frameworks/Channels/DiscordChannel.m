@@ -233,7 +233,7 @@ static const NSUInteger kDiscordIntents = (1 << 0) | (1 << 9) | (1 << 12) | (1 <
 }
 
 - (NSDictionary *)statusInfo {
-    return @{@"botUserId": _botUserId ?: @"", @"lastError": _lastError ?: @""};
+    return @{@"botUserId": _botUserId ?: @"", @"state": _running ? (_connected ? @"connected" : @"connecting") : @"stopped", @"lastError": _lastError ?: @""};
 }
 
 @end

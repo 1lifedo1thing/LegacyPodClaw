@@ -21,6 +21,19 @@ static const NSTimeInterval kMaxMessageAge = 600;
 }
 @end
 
+/* plain words for the status row; the http code stays so a search finds the cause */
+static NSString *TelegramErrorText(NSInteger status, id json) {
+    id desc = [json isKindOfClass:[NSDictionary class]] ? [json objectForKey:@"description"] : nil;
+    NSString *detail = [desc isKindOfClass:[NSString class]] && [desc length] ? [NSString stringWithFormat:@": %@", desc] : @"";
+    switch (status) {
+        case 401: return @"Telegram refused the bot token (HTTP 401). Check the Bot Token in Settings.";
+        case 404: return @"Telegram does not know this bot token (HTTP 404). Check the Bot Token in Settings.";
+        case 409: return [NSString stringWithFormat:@"Telegram refused the poll (HTTP 409)%@. "
+                          @"Another client or a webhook uses this bot.", detail];
+    }
+    return [NSString stringWithFormat:@"Telegram sent an error (HTTP %ld)%@", (long)status, detail];
+}
+
 @implementation OCTelegramChannel
 
 @synthesize messageDelegate = _messageDelegate;
@@ -77,7 +90,7 @@ static const NSTimeInterval kMaxMessageAge = 600;
         BOOL ok = !error && status == 200 && [json isKindOfClass:[NSDictionary class]] && [[json objectForKey:@"ok"] boolValue];
         if (!ok) {
             _connected = NO;
-            [self _setError:error ? [error localizedDescription] : [NSString stringWithFormat:@"HTTP %ld", (long)status]];
+            [self _setError:error ? [error localizedDescription] : TelegramErrorText(status, json)];
             if (status == 401 || status == 404) {
                 /* the token is wrong; polling again would only repeat the failure */
                 NSLog(@"[Telegram] the bot token was rejected, stopping");
@@ -154,7 +167,7 @@ static const NSTimeInterval kMaxMessageAge = 600;
 }
 
 - (NSDictionary *)statusInfo {
-    return @{@"polling": @(_running), @"lastError": _lastError ?: @""};
+    return @{@"polling": @(_running), @"state": _running ? (_connected ? @"connected" : @"connecting") : @"stopped", @"lastError": _lastError ?: @""};
 }
 
 - (void)_apiCall:(NSString *)method body:(NSDictionary *)body done:(dispatch_block_t)done {

@@ -103,7 +103,7 @@ static BOOL SlackTokenRefused(NSString *error) {
                 [self _stopWithError:[NSString stringWithFormat:@"Slack refused the bot token (%@). Check the Bot Token in Settings.", code]];
                 return;
             }
-            [self _retry:error ? [error localizedDescription] : [NSString stringWithFormat:@"auth.test: %@", code]];
+            [self _retry:error ? [error localizedDescription] : [NSString stringWithFormat:@"Slack did not accept the bot token check (%@)", code]];
             return;
         }
         [_botUserId release];
@@ -124,7 +124,7 @@ static BOOL SlackTokenRefused(NSString *error) {
                 [self _stopWithError:[NSString stringWithFormat:@"Slack refused the app token (%@). Check the App Token in Settings.", code]];
                 return;
             }
-            [self _retry:error ? [error localizedDescription] : [NSString stringWithFormat:@"apps.connections.open: %@", [json objectForKey:@"error"]]];
+            [self _retry:error ? [error localizedDescription] : [NSString stringWithFormat:@"Slack did not open a socket (%@)", code]];
             return;
         }
         _ws = [[OCTLSWebSocket alloc] initWithURL:[NSURL URLWithString:url]];
@@ -210,7 +210,7 @@ static BOOL SlackTokenRefused(NSString *error) {
 }
 
 - (NSDictionary *)statusInfo {
-    return @{@"botUserId": _botUserId ?: @"", @"lastError": _lastError ?: @""};
+    return @{@"botUserId": _botUserId ?: @"", @"state": _running ? (_connected ? @"connected" : @"connecting") : @"stopped", @"lastError": _lastError ?: @""};
 }
 
 @end

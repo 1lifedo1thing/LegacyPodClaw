@@ -8,6 +8,8 @@ theme = "legacypodclaw"
   author = "Matt Hesketh"
   github = "https://github.com/wrxck/LegacyPodClaw"
   version = "0.3.0"
+  # update with the release; the home page shows it
+  codeSize = "~22,400 LOC"
 
 [markup]
   [markup.highlight]

@@ -3,7 +3,7 @@ Name: LegacyPodClaw
 Depends: firmware (>= 6.0), mobilesubstrate, preferenceloader
 Version: 0.4.0
 Architecture: iphoneos-arm
-Description: LegacyPodClaw - AI Assistant for iOS 6 (formerly ClawPod). Native port of OpenClaw (openclaw.ai) for all jailbroken iOS 6 devices (iPod Touch 4, iPhone 3GS/4/4S, iPad 2/3/mini). Features: Siri-like overlay (home hold), Notification Center widget, lock screen status, app switcher widget, Spotlight integration, full gateway server, channels (Telegram/Discord/IRC/Slack), 10 AI providers, tool system, plugin SDK. Built with Theos. Inspired by PicoClaw (sipeed/picoclaw) and NanoClaw (qwibitai/nanoclaw).
+Description: LegacyPodClaw - AI Assistant for iOS 6 (formerly ClawPod). Native port of OpenClaw (openclaw.ai) for jailbroken iOS 6 devices (iPod touch 4, iPhone 3GS/4/4S, iPad 2/3/mini). Features: home-button overlay, Notification Center widget, lock screen status, gateway server, chat channels (Telegram, Discord, Slack, IRC, webhook), Anthropic and OpenAI-compatible providers, tools with approval prompts, plugin SDK, keychain secrets. HTTPS through wolfSSL. Built with Theos. Inspired by PicoClaw (sipeed/picoclaw) and NanoClaw (qwibitai/nanoclaw).
 Maintainer: Matt Hesketh
 Author: Matt Hesketh
 Section: Utilities

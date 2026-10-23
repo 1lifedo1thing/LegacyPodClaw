@@ -14,6 +14,7 @@ static const NSUInteger kDiscordIntents = (1 << 0) | (1 << 9) | (1 << 12) | (1 <
     OCTLSWebSocket *_ws;
     BOOL _running, _connected, _awaitingAck;
     NSTimer *_heartbeatTimer;
+    NSTimeInterval _heartbeatInterval;
     NSInteger _lastSequence;
     NSString *_botUserId;
     NSString *_lastError;
@@ -125,9 +126,12 @@ static const NSUInteger kDiscordIntents = (1 << 0) | (1 << 9) | (1 << 12) | (1 <
             NSTimeInterval interval = [hello isKindOfClass:[NSDictionary class]]
                 ? [[hello objectForKey:@"heartbeat_interval"] doubleValue] / 1000.0 : 0;
             if (interval < 1) interval = 41.25;
+            _heartbeatInterval = interval;
             [_heartbeatTimer invalidate];
-            _heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:interval target:self
-                                                             selector:@selector(_heartbeat) userInfo:nil repeats:YES];
+            /* discord asks for a random first delay, so many clients that reconnect at once do not beat together */
+            double jitter = arc4random_uniform(10001) / 10000.0;
+            _heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:interval * jitter target:self
+                                                             selector:@selector(_firstHeartbeat) userInfo:nil repeats:NO];
             [self _sendIdentify];
             break;
         }
@@ -144,6 +148,12 @@ static const NSUInteger kDiscordIntents = (1 << 0) | (1 << 9) | (1 << 12) | (1 <
     if (!json) return;
     NSString *s = [[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] autorelease];
     [_ws sendText:s];
+}
+
+- (void)_firstHeartbeat {
+    _heartbeatTimer = [NSTimer scheduledTimerWithTimeInterval:_heartbeatInterval target:self
+                                                     selector:@selector(_heartbeat) userInfo:nil repeats:YES];
+    [self _heartbeat];
 }
 
 - (void)_heartbeat {

@@ -4,32 +4,32 @@ description: "Configure and use any of 10 supported AI providers"
 weight: 2
 ---
 
-LegacyPodClaw supports 10 AI providers with automatic failover. If your primary provider fails, the agent tries the next configured provider.
+LegacyPodClaw supports 10 AI providers. Pick one in the app: Settings, Model Provider. There is no automatic failover.
 
 ## Anthropic
 
 The default provider. Supports Claude models.
 
 - **Settings:** API Key
-- **Models:** claude-sonnet-4-20250514, claude-haiku, and others
+- **Models:** claude-sonnet-5-5 (default), claude-opus-5-5, claude-haiku-5-5, claude-fable-5-1
 - **Base URL:** `https://api.anthropic.com` (default)
 
 ## OpenAI
 
 - **Settings:** API Key
 - **Models:** gpt-4o, gpt-4o-mini, and others
-- **Base URL:** `https://api.openai.com` (default)
+- **Base URL:** `https://api.openai.com/v1` (default)
 
 ## Google / Gemini
 
 - **Settings:** API Key
-- **Models:** gemini-pro, gemini-flash, and others
+- **Models:** gemini-2.5-flash and others, through the OpenAI-compatible endpoint
 
 ## Ollama (Self-Hosted)
 
 Run models locally on your network:
 
-- **Settings:** Base URL (e.g. `http://192.168.1.100:11434`)
+- **Settings:** Base URL (e.g. `http://192.168.1.100:11434/v1`)
 - **No API key needed**
 - **Models:** Whatever you have pulled in Ollama
 

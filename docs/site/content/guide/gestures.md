@@ -1,45 +1,62 @@
 ---
-title: "Gestures & Entry Points"
-description: "All the ways to activate LegacyPodClaw"
+title: "Gestures and Entry Points"
+description: "All the ways to open LegacyPodClaw"
 weight: 1
 ---
 
-LegacyPodClaw hooks into iOS via MobileSubstrate, replacing system surfaces with AI-powered alternatives. The tweak only loads into SpringBoard (`com.apple.springboard`), so it won't interfere with other apps.
+The LegacyPodClaw tweak is a MobileSubstrate tweak. Its filter loads it only into SpringBoard (`com.apple.springboard`). It does not load into other apps.
 
-## Home Button Hold
+The overlay and the Notification Center widget use the provider and model that you set in the app. See [Configuration](/getting-started/configuration/).
 
-**Replaces:** Voice Control (most devices) / Siri (iPhone 4S)
+## Home-button hold
 
-Hold the home button to bring up the LegacyPodClaw AI overlay. This is the primary entry point.
+**Replaces:** Voice Control, or Siri on the iPhone 4S.
 
-On iPhone 4S, the tweak hooks `SBAssistantController` (Siri's activation path). On all other devices, it hooks the Voice Control activation.
+Hold the home button to open the overlay. Type a question and tap **Send**. To close the overlay, press the home button or tap the close button.
 
-## Swipe Left from Home Screen
+- On most devices, the tweak hooks the Voice Control path (`SBVoiceControlController`).
+- On the iPhone 4S, the tweak hooks the Siri path (`SBAssistantController`).
+- On the lock screen, the hold keeps Apple's behaviour. The overlay never opens while the device is locked.
 
-**Replaces:** Spotlight Search
+## Headset button
 
-Swipe left from the first home screen page to open the LegacyPodClaw dashboard instead of Spotlight.
+A hold on the headset button also opens the overlay when the device is unlocked. This includes a Bluetooth headset that starts Voice Control or Siri.
 
-## Notification Center Widget
+## Spotlight page: dashboard
 
-**Pull down from top of screen**
+Swipe left from the first home screen page. The LegacyPodClaw dashboard shows in place of Spotlight. It has three parts:
 
-A quick-ask widget appears in Notification Center (implemented as a `BBWeeAppController`). Type a quick question without leaving your current app.
+- **Status:** the gateway host, or **Direct API Mode**, and the model.
+- **Quick Actions:** **Ask AI**, **Open App**, **Gateway**, **Settings**, **Respring**, **Wi-Fi**, **Bright+** and **Bright-**.
+- **Device:** the battery, the brightness, the SpringBoard memory and the iOS version.
 
-## Lock Screen Status
+{{< screenshot src="img/screens/dashboard.png" caption="The dashboard on the Spotlight page" >}}
 
-**Lock the device**
+The **Gateway** button opens the app. The app then asks before it starts the gateway server.
 
-A status display on the lock screen shows recent AI activity or a configured status message.
+To get Spotlight back, turn off **Settings > LegacyPodClaw > Dashboard on Spotlight Page**. With the dashboard off, a Spotlight search of three or more characters also opens the overlay.
 
-## App Switcher Widget
+## Notification Center widget
 
-**Double-tap home**
+Pull down Notification Center. The LegacyPodClaw widget shows the status, a question field and an **Ask** button. The reply shows in the widget.
 
-A widget page in the app switcher tray for quick access while multitasking.
+{{< screenshot src="img/screens/nc-widget.png" caption="The quick-ask widget in Notification Center" >}}
 
-## Shake Gesture
+- Tap the title area to open the app.
+- The widget does not run while the device is locked with a passcode.
+- The widget sends HTTPS through the tweak's wolfSSL client.
 
-**Shake in any app**
+## Lock screen
 
-Opens the AI overlay from anywhere. Useful when you don't want to leave your current app to hold the home button.
+- A small label below the date shows **LegacyPodClaw - Ready** when an Anthropic key is set, or the gateway host when one is set.
+- The lock screen camera grabber shows the LegacyPodClaw icon.
+- With no passcode, the camera gesture unlocks the device and opens the overlay.
+- With a passcode, the camera gesture keeps Apple's camera, so the gesture cannot skip the passcode.
+
+## App switcher
+
+Double-click the home button and swipe right to the music controls. LegacyPodClaw adds a page to the left of them. The page shows the status, whether an API key is set and the SpringBoard memory use. Its **Open** button opens the app.
+
+## Shake
+
+Shake the device on the home screen to open the overlay. The tweak runs only in SpringBoard, so a shake in another app does nothing.

@@ -1,42 +1,115 @@
 ---
-title: "Channels"
-description: "Connect LegacyPodClaw to Telegram, Discord, IRC, Slack, and webhooks"
+title: "Chat Channels"
+description: "Talk to the assistant from Telegram, Discord, Slack, IRC and a webhook"
 weight: 5
 ---
 
-When running the gateway server, LegacyPodClaw can bridge to external chat platforms.
+A chat channel lets you talk to the assistant from a chat service. LegacyPodClaw has five channels:
+
+| Channel | Connection |
+|---|---|
+| Telegram | Bot API long polling |
+| Discord | Gateway WebSocket |
+| Slack | Socket Mode WebSocket. No public URL is necessary. |
+| IRC | Plain or TLS connection |
+| Webhook | `POST /webhook/incoming` on the gateway server |
+
+Set up each channel in the app: tap the gear button, then a channel under **Chat Channels**. Each channel screen has an **Enabled** switch, the channel fields and a **Status** row.
+
+## How channels work
+
+- Each chat or thread gets its own conversation. The reply goes back to the same chat.
+- Each conversation keeps its last 20 messages.
+- The channels use the provider and model that you selected in **Model Provider**.
+- A message longer than 4,000 characters is cut.
+- While a reply runs, the app queues up to 3 more messages from the same chat.
+
+## Allow lists
+
+Each channel has an allow list of IDs. The app ignores a message from a sender that is not on the list. **An empty list ignores everyone.**
+
+Enter the IDs separated by commas or spaces. The app compares the list with the sender ID, the chat ID and, for IRC, the `nick!user@host` mask.
+
+## Tools in chats
+
+Chat text comes from outside the device, so the app does not trust it.
+
+- With **Tools in Chats** off (the default), channel conversations have no tools.
+- With **Tools in Chats** on, each tool call from a chat shows an approval alert on the device.
+
+## Channels stop with the app
+
+The channels run inside the app. They stop when iOS suspends or quits the app.
+
+With **Start on Boot** on, the app starts the channels and the gateway server when SpringBoard finishes booting. The app must already run when this happens.
 
 ## Telegram
 
-Connect a Telegram bot to your device:
+1. Make a bot with [@BotFather](https://t.me/botfather).
+2. In the app, open **Chat Channels > Telegram**.
+3. Enter the **Bot Token**.
+4. Enter your user ID or chat ID in **Allowed IDs**. Your user ID is the chat ID of a private chat with the bot.
+5. Turn on **Enabled**.
 
-1. Create a bot via [@BotFather](https://t.me/botfather)
-2. Enter the bot token in **Settings > LegacyPodClaw > Channels > Telegram**
-3. Messages to your bot are processed by the on-device AI
+The bot ignores a message that is older than 10 minutes.
 
 ## Discord
 
-1. Create a Discord bot in the [Developer Portal](https://discord.com/developers)
-2. Enter the bot token in **Settings > LegacyPodClaw > Channels > Discord**
-3. The bot responds in channels it's added to
+1. Make a bot in the [Discord Developer Portal](https://discord.com/developers).
+2. Turn on the **Message Content** intent for the bot.
+3. In the app, open **Chat Channels > Discord**.
+4. Enter the **Bot Token**.
+5. Enter user or channel IDs in **Allowed IDs**.
+6. Turn on **Enabled**.
 
-## IRC
-
-Connect to any IRC network:
-
-1. Enter server, port, nick, and channel in **Settings > LegacyPodClaw > Channels > IRC**
-2. The AI responds to messages in the configured channel
-
-Markdown formatting is automatically converted to IRC formatting (bold, italic, etc.).
+In a server, the bot answers only when you mention it. If Discord closes the connection with a fatal code (4004 or 4010 to 4014), the channel stops and the **Status** row shows the reason.
 
 ## Slack
 
-1. Create a Slack app with bot permissions
-2. Enter the bot token in **Settings > LegacyPodClaw > Channels > Slack**
+1. Make a Slack app and turn on Socket Mode.
+2. Make an app-level token with `connections:write`.
+3. Give the bot token the scopes `chat:write`, `app_mentions:read` and `im:history`.
+4. In the app, open **Chat Channels > Slack**.
+5. Enter the **App Token** (`xapp-...`) and the **Bot Token** (`xoxb-...`).
+6. Enter member or channel IDs in **Allowed IDs**.
+7. Turn on **Enabled**.
 
-## Webhooks
+In a channel, the app answers only when you mention it. A long reply is sent in parts of at most 3,500 characters.
 
-Generic webhook integration for any platform:
+## IRC
 
-1. Configure an incoming webhook URL in **Settings > LegacyPodClaw > Channels > Webhooks**
-2. LegacyPodClaw POSTs AI responses to the webhook URL
+1. In the app, open **Chat Channels > IRC**.
+2. Enter the **Server** and the **Nickname**.
+3. Optional: enter the **Port**. The default is 6697 with TLS and 6667 without TLS.
+4. Turn on **Use TLS** if the server supports it.
+5. Optional: enter a **Password**. The app sends it as the server password (`PASS`).
+6. Enter the **Channels** to join, for example `#one, #two`.
+7. Enter `nick!user@host` masks or nicks in **Allowed**.
+8. Turn on **Enabled**.
+
+In a channel, the bot answers only lines that start with its nick. Use the full `nick!user@host` mask where you can, because anyone can take a bare nick. The bot removes Markdown marks from its replies.
+
+## Webhook
+
+The webhook channel receives messages through the gateway server on the device. The gateway server must run.
+
+1. In the app, open **Chat Channels > Webhook**.
+2. Enter the **Callback URL**. The app posts each reply to this URL.
+3. Optional: enter a **Callback Token**. The app sends it as `Authorization: Bearer <token>` with each reply.
+4. Enter the `senderId` values to accept in **Allowed Senders**.
+5. Turn on **Enabled**.
+
+To send a message, post JSON to the gateway server with the gateway access token:
+
+```bash
+curl -X POST http://DEVICE_IP:18789/webhook/incoming \
+  -H "Authorization: Bearer GATEWAY_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello", "senderId": "me", "chatId": "main"}'
+```
+
+The reply is a POST to the callback URL with the body `{"text": "...", "chatId": "main"}`. The `text` field can have at most 8,000 characters.
+
+## Plugin channels
+
+A plugin can add a channel. Set its allow list with the `<channelId>AllowedIds` preference. See [Plugin SDK](/developer/plugin-sdk/).

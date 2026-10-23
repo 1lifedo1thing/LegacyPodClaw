@@ -1,53 +1,51 @@
 ---
 title: "Memory Management"
-description: "How LegacyPodClaw handles 256MB-1GB devices"
+description: "How LegacyPodClaw works on devices with 256 MB to 1 GB of RAM"
 weight: 3
 ---
 
-LegacyPodClaw runs on devices with 256MB to 1GB of RAM, with an 80MB app memory budget. Every byte matters.
+LegacyPodClaw runs on devices with 256 MB to 1 GB of RAM. The app has a memory budget of 80 MB.
 
 ## No ARC
 
-The entire codebase uses manual retain/release (`-fno-objc-arc`). This eliminates ARC's overhead and gives complete control over object lifetimes.
+Every target builds with `-fno-objc-arc`. The code uses manual retain and release, so each object lifetime is explicit.
 
-## Memory Pool
+- Do not use `__weak` or `weak` properties. Use `assign` and clear the pointer in `dealloc`.
+- Balance each `alloc`, `copy`, `new` and `retain` with a `release` or `autorelease`.
+- Put an `@autoreleasepool` around a loop that makes many temporary objects.
 
-The `MemoryPool` framework provides:
+## Memory monitor
 
-- Pre-allocated memory pools for frequently created objects
-- Avoids repeated malloc/free cycles
-- Pool sizes are tuned for each object type
+`OCMemoryMonitor` (`Frameworks/Memory/MemoryPool.h`) checks the app's memory use every 5 seconds. It compares the use with the 80 MB budget and reports four levels:
 
-## LRU Cache
+| Level | Use of the budget | What the app does |
+|---|---|---|
+| Normal | 60 % or less | Nothing |
+| Warning | More than 60 % | Trims the message windows |
+| Critical | More than 80 % | Trims the message windows, runs SQLite `VACUUM` and clears the URL cache |
+| Terminal | More than 90 % | Also clears the agent context and the channel conversations |
 
-A byte-budgeted LRU (Least Recently Used) cache:
+A system memory warning has the same effect as the Critical level.
 
-- **2MB total budget** for cached data
-- Automatically evicts oldest entries when budget is exceeded
-- Used for API response caching, parsed data, etc.
+## Message windows
 
-## Message Windowing
+- Each chat session keeps at most 50 messages in RAM.
+- All messages stay in the SQLite store, `openclaw.db` in the app's Documents directory.
+- When the app goes to the background, it trims the message windows and optimises the store.
+- A trim empties the windows of the inactive sessions and cuts the active session to 50 messages.
 
-Only **50 messages** are kept in RAM per chat session:
+## SQLite store
 
-- Older messages are offloaded to SQLite via the `Store` framework
-- Messages are loaded back on demand (scrolling up)
-- SQLite uses statement caching to minimise allocation
+`OCStore` (`Frameworks/Store/Store.h`) uses WAL mode and caches prepared statements.
 
-## WebSocket Buffers
+## Context budget
 
-- **4KB read buffers** (not the typical 64KB)
-- Chunked reading to avoid large allocations
+The agent sends at most **Max Context Tokens** of conversation to the model. The default is 2048. When the conversation is longer, the agent drops the oldest messages. A chat channel conversation uses at most 4096 tokens.
 
-## Memory Pressure Monitor
+## WebSocket buffers
 
-Four escalating levels:
+The remote gateway WebSocket client reads in 4 KB buffers, not the usual 64 KB.
 
-| Level | Threshold | Action |
-|-------|----------|--------|
-| Normal | <50% budget | Normal operation |
-| Warning | 50-70% budget | Flush non-essential caches |
-| Critical | 70-90% budget | Reduce message window, flush all caches |
-| Terminal | >90% budget | Auto-shed — aggressively release everything non-essential |
+## Unused helpers
 
-The monitor checks memory usage periodically and escalates/de-escalates as needed.
+`MemoryPool.h` also has `OCLRUCache`, a cache with a byte budget, and `OCBufferPool`, a pool of reusable buffers. The app does not use them yet.

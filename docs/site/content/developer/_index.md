@@ -1,7 +1,7 @@
 ---
 title: "Developer"
-description: "Build, extend, and understand LegacyPodClaw internals"
+description: "Build, extend and understand LegacyPodClaw"
 weight: 3
 ---
 
-Technical documentation for building LegacyPodClaw from source, writing plugins, and understanding the architecture.
+These pages tell how to build LegacyPodClaw from source, how to write a plugin and how the parts work together.

@@ -50,9 +50,9 @@ They cover the HTTP response parser, the file guardrails and the tool input chec
 
 Configure everything in **Settings > LegacyPodClaw** or in the app's Settings screen.
 
-- **Provider and model:** choose a provider, a model and its API key. The default model is `claude-sonnet-5-5`.
+- **Provider and model:** choose a provider, a model and its API key in the app's Settings screen. The default model is `claude-sonnet-5-5`. The Settings app has only the Anthropic key.
 - **Secrets:** API keys and tokens go to the keychain through `clawpodd`, never to the settings plist.
-- **Gateway server:** the on-device gateway needs the access token shown under Gateway Server > Access Token.
+- **Gateway server:** each client of the on-device gateway needs the access token. Find it in the app under Gateway Server > Access Token.
 - **Channels:** each channel needs its token and a sender allow list. An empty list ignores everyone.
 
 ## Layout
@@ -64,7 +64,7 @@ Frameworks/
   Channels/              Telegram, Discord, Slack, IRC, webhook, router
   Chat/                  sessions and messages
   Gateway/               gateway client
-  Media/                 text to speech, transcription, link reading
+  Media/                 text to speech, transcription, link reading (not used by the app yet)
   Memory/                memory pool and pressure monitor
   Plugin/                plugin loader
   Providers/             Anthropic and OpenAI-compatible providers

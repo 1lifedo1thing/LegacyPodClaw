@@ -1,0 +1,12 @@
+- src: img/screens/chat.png
+  caption: Chat with a streamed reply
+- src: img/screens/overlay.png
+  caption: The overlay on a home-button hold
+- src: img/screens/tool-approval.png
+  caption: Approval before a risky tool runs
+- src: img/screens/dashboard.png
+  caption: The dashboard on the Spotlight page
+- src: img/screens/nc-widget.png
+  caption: The Notification Center widget
+- src: img/screens/settings.png
+  caption: Provider and channel settings

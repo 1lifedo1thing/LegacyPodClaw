@@ -4,6 +4,71 @@ description: "Release history"
 weight: 5
 ---
 
+## v0.4.0
+
+Version 0.4.0 is a full rewrite of the app's network, secret, tool and package code.
+
+### Network
+
+- All HTTPS goes through `CPTLSClient` on wolfSSL 5.9.4. It uses TLS 1.2 or later, checks the certificate against the bundled Mozilla CA list, checks the host name and sends SNI.
+- `CPFetch` sends a one-shot request. It refuses each scheme other than `http` and `https`. Before, `http_fetch` could read `file://` URLs.
+- A long-lived wolfSSL connection carries the Discord and Slack WebSockets and IRC over TLS.
+- The Notification Center widget sends HTTPS through the tweak's wolfSSL client.
+- wolfSSL seeds its random number generator from `/dev/urandom`, and it accepts 4096-bit RSA roots.
+
+### clawpodd and secrets
+
+- `clawpodd` answers only fixed read-only questions: ping, status, battery, processes, crash list and an allow-listed `sysctl`. It has no command or file-read operation.
+- `clawpodd` registers its mach services as root, then drops to `mobile`.
+- API keys and tokens live in the keychain. `clawpodd` serves them over a mach service and checks the caller. The settings plist holds no secret.
+- `dpkg --purge` deletes the secrets from the keychain.
+
+### Tools
+
+- Every tool call goes through `OCToolDispatcher`. It checks the input against the schema, applies the path guardrails, enforces a timeout and asks before a risky tool runs.
+- The approval alert has **Allow** and **Deny** buttons. It shows the command, path and URL in full.
+- `bash` has no command denylist. You approve each call.
+- Reminders use EventKit. Notes writes run in one database transaction.
+- `calculate` accepts only arithmetic. `open_url` and `launch_app` need approval.
+
+### Gateway server
+
+- Each request needs a random 256-bit access token. Only `GET /healthz` is public.
+- Tool calls through the gateway go through the dispatcher.
+
+### SpringBoard tweak
+
+- The overlay, the Notification Center widget and the dashboard use the provider and model that you set in the app.
+- The overlay does not open on the lock screen, and it hides when the device locks.
+- With a passcode set, the lock screen camera keeps Apple's behaviour.
+- The Notification Center widget does not run while the device is locked with a passcode.
+- Files that the app passes to SpringBoard live in a 0700 directory, not in `/tmp`.
+
+### Providers, channels and plugins
+
+- The app has two provider adapters: the Anthropic Messages API and one OpenAI-compatible adapter. The default model is `claude-sonnet-5-5`.
+- Chat channels for Telegram, Discord, Slack, IRC and a webhook. Each channel has an allow list.
+- Plugins load only from root-owned bundles in `/Library/LegacyPodClaw/Plugins`.
+
+### Build and tests
+
+- A macOS host test target (`make test`) covers the HTTP response parser, the file guardrails and the tool input checks.
+- The build no longer hides compiler warnings.
+
+### Fixes from the reviews
+
+- The guardrails resolve each path physically, so a symbolic link or `..` cannot reach a protected path.
+- `write_file` enforces its 1 MB limit.
+- A failed music download rolls back its MediaLibrary write.
+- The Mac MCP server and the music proxy were hardened. The proxy needs a token on a LAN address.
+- Self-signed gateway mode needs a SHA-256 certificate pin.
+
+### Removed
+
+- Automatic provider failover. It never ran.
+- The native Gemini `generateContent` API. Gemini works through Google's OpenAI-compatible endpoint.
+- Slack incoming webhooks and the Slack Events API. Socket Mode replaces them.
+
 ## v0.3.0
 
 - **Renamed** from ClawPod to LegacyPodClaw (naming conflict with existing project)

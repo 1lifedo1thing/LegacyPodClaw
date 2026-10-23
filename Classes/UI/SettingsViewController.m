@@ -36,6 +36,7 @@ enum {
     kTagAutoStart = 3001,
     kTagTokenAlert = 500,
     kTagTokenConfirm = 501,
+    kTagResetConfirm = 502,
     kTagInput = 100,
 };
 
@@ -371,11 +372,22 @@ enum {
             }
             [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
         } else {
-            [_prefs removeAllObjects];
-            [self _savePrefs];
-            [tableView reloadData];
+            UIAlertView *confirm = [[UIAlertView alloc] initWithTitle:@"Reset All Settings"
+                message:@"This deletes every setting, API key and token." delegate:self
+                cancelButtonTitle:@"Cancel" otherButtonTitles:@"Reset", nil];
+            confirm.tag = kTagResetConfirm;
+            [confirm show];
+            [confirm release];
         }
     }
+}
+
+- (void)_resetAllSettings {
+    [_prefs removeAllObjects];
+    /* secrets live in the keychain, so clearing the plist alone would keep them */
+    for (NSString *key in [CPSecretStore allSecretKeys]) [CPSecretStore setSecret:nil forKey:key];
+    [self _savePrefs];
+    [self.tableView reloadData];
 }
 
 #pragma mark - Provider Picker
@@ -459,6 +471,10 @@ enum {
 }
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (alertView.tag == kTagResetConfirm) {
+        if (buttonIndex == 1) [self _resetAllSettings];
+        return;
+    }
     if (alertView.tag == kTagTokenAlert || alertView.tag == kTagTokenConfirm) {
         [self _handleTokenAlert:alertView button:buttonIndex];
         return;

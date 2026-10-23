@@ -23,9 +23,11 @@ Design record for this agent tooling: `.claude/plans/agent-tooling.md`.
 Do not break these. Each one closes a real defect.
 
 1. All HTTPS goes through `CPTLSClient` (wolfSSL,
-   `Frameworks/System/TLSClient.h`). Do not add a new HTTPS call through
-   `NSURLConnection`. The iOS 6 TLS stack cannot reach modern servers
-   safely.
+   `Frameworks/System/TLSClient.h`). For a one-shot request use `CPFetch`
+   (`Frameworks/System/HTTPFetch.h`); it uses `CPTLSClient` for https and
+   refuses schemes other than http and https. Do not add a new HTTPS call
+   through `NSURLConnection`. The iOS 6 TLS stack cannot reach modern
+   servers safely.
 2. Secrets (API keys, tokens, passwords) go through `CPSecretStore`
    (`Frameworks/System/SecretStore.h`). It keeps them in the keychain
    through `clawpodd`. Never write a secret to the prefs plist.

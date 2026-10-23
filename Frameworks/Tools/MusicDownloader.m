@@ -11,6 +11,7 @@
  * Default: http://[gateway-host]:18790
  */
 
+#import "HTTPFetch.h"
 #import "MusicDownloader.h"
 #import "TLSClient.h"
 #import <sqlite3.h>
@@ -283,6 +284,14 @@ static NSString *_getMusicProxyURL(void) {
     return nil;
 }
 
+/* youtube ids are 11 url-safe characters; anything else could add query parameters to the proxy url */
+static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
+    if (![videoId isKindOfClass:[NSString class]] || [videoId length] != 11) return NO;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:
+        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"];
+    return [videoId rangeOfCharacterFromSet:[allowed invertedSet]].location == NSNotFound;
+}
+
 @implementation OCMusicDownloader
 
 + (NSArray *)allTools {
@@ -398,72 +407,54 @@ static NSString *_getMusicProxyURL(void) {
         return;
     }
 
+    if (!CPMusicVideoIdIsValid(videoId)) {
+        completion(nil, [NSError errorWithDomain:@"MusicDL" code:-10
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid video id"}]);
+        return;
+    }
     NSString *url = [NSString stringWithFormat:@"%@/info?v=%@", proxyBase, videoId];
 
-    /* Use NSURLConnection for HTTP (non-TLS) proxy, CPTLSClient for HTTPS */
-    if ([proxyBase hasPrefix:@"https://"]) {
-        [CPTLSClient request:url method:@"GET" headers:nil body:nil
-            completion:^(NSData *data, NSInteger status, NSError *error) {
-                if (error || !data) {
-                    completion(nil, error ?: [NSError errorWithDomain:@"MusicDL" code:-11
-                        userInfo:@{NSLocalizedDescriptionKey: @"Proxy unreachable"}]);
-                    return;
-                }
-                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                completion(json, nil);
-            }];
-    } else {
-        /* HTTP — use NSURLConnection */
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:url]
-                cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:30];
-            NSURLResponse *resp = nil;
-            NSError *err = nil;
-            NSData *data = [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (err || !data) {
-                    completion(nil, err ?: [NSError errorWithDomain:@"MusicDL" code:-11
-                        userInfo:@{NSLocalizedDescriptionKey:
-                            [NSString stringWithFormat:@"Music proxy unreachable at %@. "
-                            @"Run: python3 LegacyPodClawMCP/music_proxy.py on a computer on the same network.", proxyBase]}]);
-                    return;
-                }
-                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                if (!json) {
-                    completion(nil, [NSError errorWithDomain:@"MusicDL" code:-12
-                        userInfo:@{NSLocalizedDescriptionKey: @"Invalid response from proxy"}]);
-                    return;
-                }
-                completion(json, nil);
-            });
-        });
-    }
+    CPFetch(url, @"GET", nil, nil, 30, ^(NSData *data, NSInteger status, NSError *err) {
+        if (err || !data || status != 200) {
+            completion(nil, err ?: [NSError errorWithDomain:@"MusicDL" code:-11
+                userInfo:@{NSLocalizedDescriptionKey:
+                    [NSString stringWithFormat:@"Music proxy at %@ did not answer (HTTP %ld). "
+                    @"Run: python3 LegacyPodClawMCP/music_proxy.py on a computer on the same network.",
+                    proxyBase, (long)status]}]);
+            return;
+        }
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (![json isKindOfClass:[NSDictionary class]]) {
+            completion(nil, [NSError errorWithDomain:@"MusicDL" code:-12
+                userInfo:@{NSLocalizedDescriptionKey: @"Invalid response from proxy"}]);
+            return;
+        }
+        completion(json, nil);
+    });
 }
 
 + (void)_downloadAudioViaProxy:(NSString *)videoId toPath:(NSString *)path
                     completion:(void(^)(NSError *error))completion {
 
     NSString *proxyBase = _getMusicProxyURL();
+    if (!CPMusicVideoIdIsValid(videoId)) {
+        completion([NSError errorWithDomain:@"MusicDL" code:-10
+            userInfo:@{NSLocalizedDescriptionKey: @"Invalid video id"}]);
+        return;
+    }
     NSString *url = [NSString stringWithFormat:@"%@/audio?v=%@", proxyBase, videoId];
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:url]
-            cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:120];
-        NSURLResponse *resp = nil;
-        NSError *err = nil;
-        NSData *data = [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (err || !data || [data length] < 4096) {
-                completion(err ?: [NSError errorWithDomain:@"MusicDL" code:-13
-                    userInfo:@{NSLocalizedDescriptionKey:
-                        [NSString stringWithFormat:@"Audio download failed (%lu bytes)",
-                            (unsigned long)[data length]]}]);
-                return;
-            }
-            [data writeToFile:path atomically:YES];
-            NSLog(@"[MusicDL] Saved %lu bytes to %@", (unsigned long)[data length], path);
-            completion(nil);
-        });
+    CPFetch(url, @"GET", nil, nil, 120, ^(NSData *data, NSInteger status, NSError *err) {
+        if (err || status != 200 || [data length] < 4096) {
+            completion(err ?: [NSError errorWithDomain:@"MusicDL" code:-13
+                userInfo:@{NSLocalizedDescriptionKey:
+                    [NSString stringWithFormat:@"Audio download failed (HTTP %ld, %lu bytes)",
+                        (long)status, (unsigned long)[data length]]}]);
+            return;
+        }
+        [data writeToFile:path atomically:YES];
+        NSLog(@"[MusicDL] Saved %lu bytes to %@", (unsigned long)[data length], path);
+        completion(nil);
     });
 }
 

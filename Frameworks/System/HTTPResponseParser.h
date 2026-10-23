@@ -19,6 +19,7 @@
     BOOL _chunked;
     long long _contentLength;
     unsigned long long _chunkRemain;
+    unsigned long long _received;
     BOOL _needChunkSize;
     CPHTTPSStreamChunk _onChunk;
 }

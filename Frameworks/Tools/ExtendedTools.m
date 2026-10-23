@@ -8,6 +8,7 @@
 
 #import "ExtendedTools.h"
 #import "ToolInputCheck.h"
+#import "HTTPFetch.h"
 #import <UIKit/UIKit.h>
 #import <sys/sysctl.h>
 #import <sys/mount.h>
@@ -277,13 +278,12 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         @"required": @[@"query"]};
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSString *q = [p objectForKey:@"query"];
-        NSString *encoded = [q stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        /* escape & = + too, or the query could add its own parameters */
+        NSString *encoded = [(NSString *)CFURLCreateStringByAddingPercentEscapes(NULL, (CFStringRef)q, NULL,
+            CFSTR("!*'();:@&=+$,/?#[]"), kCFStringEncodingUTF8) autorelease];
         NSString *url = [NSString stringWithFormat:
             @"https://html.duckduckgo.com/html/?q=%@", encoded];
-        NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:url]
-            cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:15];
-        [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-            completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
+        CPFetch(url, @"GET", nil, nil, 15, ^(NSData *d, NSInteger status, NSError *e) {
             if (e) { cb(nil, e); return; }
             NSString *html = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] autorelease];
             /* Extract result snippets - simple parsing */
@@ -311,7 +311,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
             }
             cb([results count] > 0 ? [results componentsJoinedByString:@"\n\n"]
                                     : @"No results found", nil);
-        }];
+        });
     };
     return t;
 }

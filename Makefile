@@ -57,6 +57,7 @@ LegacyPodClaw_FILES = \
 	Frameworks/System/System.m \
 	Frameworks/System/TLSClient.m \
 	Frameworks/System/HTTPResponseParser.m \
+	Frameworks/System/HTTPFetch.m \
 	Frameworks/System/SecretStore.m
 
 LegacyPodClaw_CFLAGS = \

@@ -1,6 +1,10 @@
 #!/bin/sh
 # LegacyPodClaw pre-removal script; $1 is remove, upgrade, deconfigure or failed-upgrade
 
+# a running app keeps the old binary and its open database; stop it before dpkg replaces or removes it
+# (the voip background mode makes ios relaunch it, so postinst and postrm stop it again)
+killall LegacyPodClaw 2>/dev/null
+
 # stop the daemon so dpkg can replace or remove its binary
 launchctl unload /Library/LaunchDaemons/pro.matthesketh.legacypodclaw.daemon.plist 2>/dev/null
 

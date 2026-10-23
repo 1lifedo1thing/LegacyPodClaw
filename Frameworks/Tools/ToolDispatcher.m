@@ -188,6 +188,28 @@ static NSString *CallerText(OCToolCaller caller) {
 
 - (void)_invoke:(OCToolDefinition *)tool input:(NSDictionary *)input
      completion:(void(^)(NSString *result, NSError *error))completion {
+    if (!tool.prepare) { [self _start:tool input:input completion:completion]; return; }
+    /* a buggy prepare must not start the tool twice */
+    __block BOOL started = NO;
+    void (^done)(NSString *, NSError *) = [[completion copy] autorelease];
+    /* copied, so a prepare that keeps the block past this call never holds a stack block */
+    void (^ready)(NSError *) = [[^(NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (started) return;
+            started = YES;
+            if (error) done(nil, error);
+            else [self _start:tool input:input completion:done];
+        });
+    } copy] autorelease];
+    @try {
+        tool.prepare(ready);
+    } @catch (NSException *e) {
+        done(nil, ToolError([NSString stringWithFormat:@"tool raised %@: %@", [e name], [e reason]]));
+    }
+}
+
+- (void)_start:(OCToolDefinition *)tool input:(NSDictionary *)input
+    completion:(void(^)(NSString *result, NSError *error))completion {
     /* the flag lives on the heap so the handler and the timer share it */
     __block BOOL done = NO;
     void (^finish)(NSString *, NSError *) = [[^(NSString *result, NSError *error) {

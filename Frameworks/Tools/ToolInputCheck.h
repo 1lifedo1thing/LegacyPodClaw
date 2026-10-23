@@ -33,3 +33,6 @@ BOOL OCMathExpressionIsSafe(NSString *expression);
 
 /* the largest length <= length that does not end inside a utf-8 sequence */
 NSUInteger OCUtf8SafeLength(const uint8_t *bytes, NSUInteger length);
+
+/* a file error with a plain message, because ios 6 shows only "Cocoa error 260" for a missing path */
+NSError *OCFileError(NSError *error, NSString *path);

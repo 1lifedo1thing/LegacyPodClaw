@@ -44,11 +44,30 @@
 #define WOLFSSL_HAVE_SP_ECC
 #define WOLFSSL_HAVE_SP_DH
 #define TFM_TIMING_RESISTANT
+#define SP_INT_BITS 4096             /* isrg root x1 and root yr sign with 4096-bit rsa keys (slack.com) */
+#define WOLFSSL_ASN_ALLOW_0_SERIAL   /* api.telegram.org sends its serial-0 go daddy g2 root in the chain */
 
 #define WOLFSSL_SMALL_STACK          /* secondary threads on ios 6 get 512k stacks */
 #define NO_FILESYSTEM                /* the ca bundle is loaded from a buffer */
 #define WOLFSSL_IGNORE_FILE_WARN
 #define NO_MAIN_DRIVER
 #define HAVE_HASHDRBG
+
+/* no_filesystem also drops the /dev/urandom seed, so wc_InitRng fails (-199) without this */
+#include <fcntl.h>
+#include <unistd.h>
+static inline int lpc_wolfssl_seed(unsigned char *out, unsigned int sz) {
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return -1;
+    while (sz > 0) {
+        ssize_t n = read(fd, out, sz);
+        if (n <= 0) { close(fd); return -1; }
+        out += n;
+        sz -= (unsigned int)n;
+    }
+    close(fd);
+    return 0;
+}
+#define CUSTOM_RAND_GENERATE_SEED lpc_wolfssl_seed
 
 #endif

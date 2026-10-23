@@ -201,6 +201,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         }
         NSError *e = nil;
         [content writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&e];
+        e = OCFileError(e, path);
         cb(e ? [e localizedDescription] : [NSString stringWithFormat:@"Written %lu bytes to %@",
             (unsigned long)[content length], path], e);
     };
@@ -220,7 +221,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         NSString *path = [p objectForKey:@"path"];
         NSError *e = nil;
         NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&e];
-        if (e) { cb(nil, e); return; }
+        if (e) { cb(nil, OCFileError(e, path)); return; }
         NSString *oldText = [p objectForKey:@"old_text"];
         NSString *newText = [p objectForKey:@"new_text"];
         if ([content rangeOfString:oldText].location == NSNotFound) {
@@ -228,6 +229,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         }
         NSString *updated = [content stringByReplacingOccurrencesOfString:oldText withString:newText];
         [updated writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&e];
+        e = OCFileError(e, path);
         cb(e ? [e localizedDescription] : @"File edited successfully", e);
     };
     return t;
@@ -244,7 +246,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         NSString *path = [p objectForKey:@"path"];
         NSError *e = nil;
         NSArray *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:&e];
-        if (e) { cb(nil, e); return; }
+        if (!items) { cb(nil, OCFileError(e, path)); return; }
         NSMutableArray *lines = [NSMutableArray array];
         for (NSString *item in items) {
             NSString *full = [path stringByAppendingPathComponent:item];
@@ -270,6 +272,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSError *e = nil;
         [[NSFileManager defaultManager] removeItemAtPath:[p objectForKey:@"path"] error:&e];
+        e = OCFileError(e, [p objectForKey:@"path"]);
         cb(e ? [e localizedDescription] : @"Deleted", e);
     };
     return t;

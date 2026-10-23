@@ -4,6 +4,7 @@
  */
 
 #import "ToolInputCheck.h"
+#import <errno.h>
 
 static BOOL ValueMatchesType(id value, NSString *type) {
     if (!type) return YES;
@@ -117,4 +118,31 @@ NSUInteger OCUtf8SafeLength(const uint8_t *bytes, NSUInteger length) {
     uint8_t lead = bytes[i - 1];
     NSUInteger need = (lead & 0x80) == 0 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
     return (back + 1 >= need) ? length : i - 1;
+}
+
+NSError *OCFileError(NSError *error, NSString *path) {
+    if (!error) return nil;
+    NSString *shown = [path length] ? path : @"(no path)";
+    NSString *domain = [error domain];
+    NSInteger code = [error code];
+    BOOL cocoa = [domain isEqualToString:NSCocoaErrorDomain];
+    NSError *under = [[error userInfo] objectForKey:NSUnderlyingErrorKey];
+    NSInteger errnum = [domain isEqualToString:NSPOSIXErrorDomain] ? code
+        : [[under domain] isEqualToString:NSPOSIXErrorDomain] ? [under code] : 0;
+    NSString *message;
+    if (errnum == ENOTDIR) message = [NSString stringWithFormat:@"Not a folder: %@", shown];
+    else if (errnum == EISDIR) message = [NSString stringWithFormat:@"Is a folder, not a file: %@", shown];
+    else if (errnum == ENOENT || (cocoa && (code == NSFileNoSuchFileError || code == NSFileReadNoSuchFileError)))
+        message = [NSString stringWithFormat:@"No such file or folder: %@", shown];
+    else if (errnum == EACCES || errnum == EPERM ||
+             (cocoa && (code == NSFileReadNoPermissionError || code == NSFileWriteNoPermissionError)))
+        message = [NSString stringWithFormat:@"Permission denied: %@", shown];
+    else if (cocoa && code == NSFileReadInapplicableStringEncodingError)
+        message = [NSString stringWithFormat:@"Not a UTF-8 text file: %@", shown];
+    else if (cocoa && code == NSFileWriteOutOfSpaceError)
+        message = [NSString stringWithFormat:@"No space left to write %@", shown];
+    else
+        message = [NSString stringWithFormat:@"%@ (%@ %ld): %@", [error localizedDescription], domain, (long)code, shown];
+    return [NSError errorWithDomain:domain code:code
+                           userInfo:@{NSLocalizedDescriptionKey: message, NSUnderlyingErrorKey: error}];
 }

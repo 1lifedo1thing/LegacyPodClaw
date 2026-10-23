@@ -55,4 +55,19 @@ void RunToolInputTests(void) {
     CHECK(OCUtf8SafeLength(euro, 2) == 1, @"cut before lone lead byte");
     const uint8_t ascii[] = {'a', 'b'};
     CHECK(OCUtf8SafeLength(ascii, 2) == 2, @"ascii untouched");
+
+    NSError *e = nil;
+    NSString *missing = @"/no/such/lpc-test-dir";
+    [[NSFileManager defaultManager] contentsOfDirectoryAtPath:missing error:&e];
+    NSString *msg = [OCFileError(e, missing) localizedDescription];
+    CHECK([msg isEqualToString:@"No such file or folder: /no/such/lpc-test-dir"], @"missing folder plain: %@", msg);
+    e = nil;
+    [NSString stringWithContentsOfFile:missing encoding:NSUTF8StringEncoding error:&e];
+    msg = [OCFileError(e, missing) localizedDescription];
+    CHECK([msg hasPrefix:@"No such file or folder"], @"missing file plain: %@", msg);
+    e = nil;
+    [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@"/etc/hosts" error:&e];
+    msg = [OCFileError(e, @"/etc/hosts") localizedDescription];
+    CHECK([msg rangeOfString:@"Cocoa error"].location == NSNotFound && [msg hasSuffix:@"/etc/hosts"], @"file as folder plain: %@", msg);
+    CHECK(OCFileError(nil, missing) == nil, @"no error stays nil");
 }

@@ -49,7 +49,7 @@ static const NSUInteger kDefaultMaxResponse = 1024;
 
 - (void)dealloc {
     [_name release]; [_toolDescription release];
-    [_inputSchema release]; [_handler release];
+    [_inputSchema release]; [_handler release]; [_prepare release];
     [super dealloc];
 }
 
@@ -603,8 +603,12 @@ static const NSUInteger kMaxToolRounds = 8;
         /* read only the first 32 kb, so a large file cannot use up the 80 mb app budget */
         NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
         if (!fh) {
+            /* the file handle gives no reason, so name the common ones */
+            BOOL isDir = NO;
+            BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir];
+            NSString *why = !exists ? @"No such file or folder" : isDir ? @"Is a folder, not a file" : @"Cannot open (permission denied?)";
             callback(nil, [NSError errorWithDomain:@"OCAgent" code:1
-                userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", path]}]);
+                userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"%@: %@", why, path]}]);
             return;
         }
         NSData *data = [fh readDataOfLength:32768];

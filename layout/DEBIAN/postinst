@@ -33,6 +33,9 @@ if [ -f "$PREFS" ]; then
     chmod 600 "$PREFS"
 fi
 
+# ios relaunches a killed voip app from the old files, so stop it again now the new binary is in place
+killall LegacyPodClaw 2>/dev/null
+
 # load the new daemon binary and mach services; prerm unloaded the old one
 launchctl unload "$DAEMON" 2>/dev/null
 launchctl load "$DAEMON"

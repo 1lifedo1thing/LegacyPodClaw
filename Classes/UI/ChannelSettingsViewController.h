@@ -12,7 +12,7 @@
 + (NSString *)titleForChannel:(NSString *)channelId;
 + (NSArray *)fieldsForChannel:(NSString *)channelId;
 + (NSString *)footerForChannel:(NSString *)channelId;
-/* the short state both the channel list and the channel screen show: Off, Connecting…, Retrying, Connected or Stopped */
+/* one short state, so the channel list and the channel screen never disagree */
 + (NSString *)stateTextForChannel:(NSString *)channelId;
 
 @end

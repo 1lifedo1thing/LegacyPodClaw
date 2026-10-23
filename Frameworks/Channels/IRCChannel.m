@@ -163,6 +163,14 @@ static const NSTimeInterval kIRCLineInterval = 1.0;
         [_currentNick release];
         _currentNick = [next copy];
         [self _sendNow:[NSString stringWithFormat:@"NICK %@", _currentNick]];
+    } else if ([command isEqualToString:@"NICK"] && prefix) {
+        /* services can rename the bot after registration; follow it or direct messages look like channel noise */
+        NSString *oldNick = [[prefix componentsSeparatedByString:@"!"] objectAtIndex:0];
+        NSString *newNick = trailing ?: ([parts count] > 1 ? [parts objectAtIndex:1] : nil);
+        if ([newNick length] && [oldNick caseInsensitiveCompare:_currentNick] == NSOrderedSame) {
+            [_currentNick release];
+            _currentNick = [newNick copy];
+        }
     } else if ([command isEqualToString:@"PRIVMSG"] && [parts count] > 1 && prefix && trailing) {
         [self _handlePrivmsg:trailing from:prefix target:[parts objectAtIndex:1]];
     }

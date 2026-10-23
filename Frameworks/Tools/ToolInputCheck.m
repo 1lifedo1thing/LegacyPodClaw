@@ -36,6 +36,12 @@ NSArray *OCToolApprovalFields(void) {
     return @[@"command", @"path", @"url", @"to", @"recipient", @"bundle_id", @"query"];
 }
 
+/* bidi overrides, zero-width marks and c1 controls change how text looks without changing what runs */
+static BOOL IsHiddenFormatChar(unichar c) {
+    return (c >= 0x80 && c <= 0x9f) || (c >= 0x200b && c <= 0x200f) || (c >= 0x202a && c <= 0x202e)
+        || (c >= 0x2066 && c <= 0x2069) || c == 0x2028 || c == 0x2029 || c == 0xfeff;
+}
+
 /* make spaces, tabs and line breaks visible, so padding cannot hide the rest of a command */
 NSString *OCToolVisibleText(NSString *value) {
     NSMutableString *out = [NSMutableString stringWithCapacity:[value length]];
@@ -49,6 +55,7 @@ NSString *OCToolVisibleText(NSString *value) {
         if (c == '\n') [out appendString:@"⏎\n"];
         else if (c == '\t') [out appendString:@"[tab]"];
         else if (c < 0x20 || c == 0x7f) [out appendFormat:@"[0x%02x]", c];
+        else if (IsHiddenFormatChar(c)) [out appendFormat:@"[U+%04X]", c];
         else [out appendFormat:@"%C", c];
     }
     if (spaces > 1) [out appendFormat:@"[%lu spaces]", (unsigned long)spaces];
@@ -66,6 +73,39 @@ NSString *OCToolApprovalText(NSDictionary *input, BOOL *tooLong) {
         [text appendFormat:@"%@: %@\n", key, OCToolVisibleText(str)];
     }
     return text;
+}
+
+NSString *OCToolOtherInputText(NSDictionary *rest) {
+    NSMutableString *text = [NSMutableString string];
+    for (NSString *key in [[rest allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+        id value = [rest objectForKey:key];
+        NSString *str = nil;
+        if ([value isKindOfClass:[NSString class]]) {
+            str = value;
+        } else if ([NSJSONSerialization isValidJSONObject:value]) {
+            NSData *json = [NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
+            if (json) str = [[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] autorelease];
+        }
+        if (!str) str = [value description];
+        NSString *visible = OCToolVisibleText(str);
+        NSUInteger length = [visible length];
+        if (length > OC_TOOL_OTHER_FIELD_SHOWN) {
+            /* say how much is hidden, so the user knows the alert does not show it all */
+            NSUInteger head = [visible rangeOfComposedCharacterSequenceAtIndex:OC_TOOL_OTHER_FIELD_SHOWN * 2 / 3].location;
+            NSUInteger tail = [visible rangeOfComposedCharacterSequenceAtIndex:length - OC_TOOL_OTHER_FIELD_SHOWN / 3].location;
+            visible = [NSString stringWithFormat:@"%@\n[%lu characters not shown]\n%@", [visible substringToIndex:head],
+                       (unsigned long)(tail - head), [visible substringFromIndex:tail]];
+        }
+        [text appendFormat:@"%@: %@\n", key, visible];
+    }
+    return text;
+}
+
+BOOL OCMathExpressionIsSafe(NSString *expression) {
+    /* nsexpression runs FUNCTION() and format specifiers, so allow only numbers and arithmetic */
+    if ([expression length] == 0 || [expression length] > 500) return NO;
+    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"0123456789.+-*/() "];
+    return [expression rangeOfCharacterFromSet:[allowed invertedSet]].location == NSNotFound;
 }
 
 /* cut at a character boundary, so a split multi-byte sequence does not garble the whole output */

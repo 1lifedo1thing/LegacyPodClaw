@@ -40,21 +40,24 @@ static const NSUInteger kMaxBodyBytes = 24 * 1024 * 1024;
 - (void)emit:(const uint8_t *)bytes length:(NSUInteger)length {
     /* bytes past the declared length are not part of this response */
     if (!_chunked && _contentLength >= 0) {
-        long long room = _contentLength - (long long)[_body length];
+        long long room = _contentLength - (long long)_received;
         if (room < (long long)length) length = room > 0 ? (NSUInteger)room : 0;
     }
     if (length == 0) return;
-    if ([_body length] + length > kMaxBodyBytes) {
+    if (_received + length > kMaxBodyBytes) {
         [self fail:CPTLSErrorTooLarge message:@"Response exceeds size limit"];
         return;
     }
-    [_body appendBytes:bytes length:length];
+    _received += length;
+    /* a streamed success goes to the chunk handler only; keeping a copy would double the memory */
+    BOOL streaming = _onChunk && statusCode >= 200 && statusCode < 300;
+    if (!streaming) [_body appendBytes:bytes length:length];
     if (_onChunk) {
         NSData *chunk = [NSData dataWithBytes:bytes length:length];
         CPHTTPSStreamChunk handler = _onChunk;
         dispatch_async(dispatch_get_main_queue(), ^{ handler(chunk); });
     }
-    if (!_chunked && _contentLength >= 0 && (long long)[_body length] >= _contentLength) {
+    if (!_chunked && _contentLength >= 0 && (long long)_received >= _contentLength) {
         complete = YES;
     }
 }
@@ -183,7 +186,7 @@ static const NSUInteger kMaxBodyBytes = 24 * 1024 * 1024;
     if (complete) return;
     if (!headersDone) {
         [self fail:CPTLSErrorProtocol message:@"Connection closed before response headers"];
-    } else if (_chunked || (_contentLength >= 0 && (long long)[_body length] < _contentLength)) {
+    } else if (_chunked || (_contentLength >= 0 && (long long)_received < _contentLength)) {
         [self fail:CPTLSErrorIO message:@"Connection closed before response completed"];
     }
     complete = YES;

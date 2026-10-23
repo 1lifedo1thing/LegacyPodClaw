@@ -757,7 +757,8 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
 }
 
 - (void)_handleChatAbort:(NSDictionary *)params reqId:(NSString *)reqId client:(OCGatewayWSClient *)client {
-    NSString *sessionKey = GWString(params, @"sessionKey");
+    /* chat.send and sessions.delete accept "key", so abort must too */
+    NSString *sessionKey = GWString(params, @"sessionKey") ?: GWString(params, @"key");
     if (sessionKey) [self abortSession:sessionKey];
     [self _sendOk:reqId payload:@{} client:client];
 }
@@ -1065,14 +1066,16 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
     /* Load message history for each session */
     for (NSString *key in _sessionEntries) {
         NSMutableArray *msgs = [NSMutableArray array];
+        /* the same 200-message bound as the live copy; the table keeps every message */
         [_store query:@"SELECT role, content, timestamp FROM gw_messages "
-         @"WHERE session_key = ? ORDER BY timestamp"
+         @"WHERE session_key = ? ORDER BY timestamp DESC LIMIT 200"
                params:@[key] enumerate:^(OCStoreRow *row, BOOL *stop) {
-            [msgs addObject:@{
+            /* the table stores seconds and the live copy milliseconds */
+            [msgs insertObject:@{
                 @"role": [row stringForColumn:@"role"] ?: @"",
                 @"content": [row stringForColumn:@"content"] ?: @"",
-                @"timestamp": @([row doubleForColumn:@"timestamp"])
-            }];
+                @"timestamp": @([row doubleForColumn:@"timestamp"] * 1000)
+            } atIndex:0];
         } error:nil];
         [_sessionHistory setObject:msgs forKey:key];
     }

@@ -30,7 +30,7 @@ typedef void(^CPHTTPSStreamChunk)(NSData *chunk);
            body:(NSData *)body
      completion:(CPHTTPSCompletion)completion;
 
-/* onChunk receives decoded body bytes on the main queue as they arrive */
+/* onChunk receives decoded body bytes on the main queue as they arrive; completion gets the body only for a non-2xx status */
 + (void)streamRequest:(NSString *)urlString
                method:(NSString *)method
               headers:(NSDictionary *)headers

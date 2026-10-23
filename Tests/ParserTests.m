@@ -56,6 +56,15 @@ void RunParserTests(void) {
     CHECK(p->complete && !p->error && p->statusCode == 201 && [Body(p) isEqualToString:@"ok"],
           @"interim 100 skipped, status %ld", (long)p->statusCode);
 
+    p = [[[CPHTTPResponseParser alloc] initWithChunkHandler:^(NSData *chunk) {}] autorelease];
+    NSData *streamed = [@"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata" dataUsingEncoding:NSASCIIStringEncoding];
+    [p feed:[streamed bytes] length:[streamed length]];
+    CHECK(p->complete && !p->error && [[p body] length] == 0, @"streamed 2xx body is not kept");
+    p = [[[CPHTTPResponseParser alloc] initWithChunkHandler:^(NSData *chunk) {}] autorelease];
+    NSData *failed = [@"HTTP/1.1 429 Too Many\r\nContent-Length: 4\r\n\r\nslow" dataUsingEncoding:NSASCIIStringEncoding];
+    [p feed:[failed bytes] length:[failed length]];
+    CHECK([[p body] length] == 4, @"streamed error body is kept for the message");
+
     p = Parse(@[@"HTTP/1.1 204 No Content\r\n\r\n"], NO);
     CHECK(p->complete && !p->error && [[p body] length] == 0, @"204 completes with no body");
 

@@ -16,6 +16,7 @@
 #import <Security/Security.h>
 #import <sys/param.h>
 #import <sys/stat.h>
+#import <stdlib.h>
 
 #define KEYCHAIN_SERVICE @"pro.matthesketh.legacypodclaw"
 #define KEYCHAIN_GROUP @"pro.matthesketh.legacypodclaw.secrets"
@@ -113,6 +114,13 @@ static void MigrateFromPrefs(void) {
 
 typedef NS_ENUM(NSInteger, CPCaller) { CPCallerUnknown, CPCallerSpringBoard, CPCallerPreferences, CPCallerApp };
 
+static BOOL CallerPathIs(const char *path, const char *expected) {
+    if (strcmp(path, expected) == 0) return YES;
+    /* cydia stashes /Applications behind a symlink and proc_pidpath returns the real path */
+    char resolved[MAXPATHLEN];
+    return realpath(expected, resolved) != NULL && strcmp(path, resolved) == 0;
+}
+
 static CPCaller CallerForAuditToken(audit_token_t token) {
     /* val[5] is the pid in the bsm audit token layout */
     int pid = (int)token.val[5];
@@ -120,9 +128,9 @@ static CPCaller CallerForAuditToken(audit_token_t token) {
     if (token.val[1] != 501) return CPCallerUnknown;
     char path[CP_PROC_PATH_MAX];
     if (pid <= 0 || proc_pidpath(pid, path, sizeof(path)) <= 0) return CPCallerUnknown;
-    if (strcmp(path, CALLER_SPRINGBOARD) == 0) return CPCallerSpringBoard;
-    if (strcmp(path, CALLER_PREFERENCES) == 0) return CPCallerPreferences;
-    if (strcmp(path, CALLER_APP) == 0) return CPCallerApp;
+    if (CallerPathIs(path, CALLER_SPRINGBOARD)) return CPCallerSpringBoard;
+    if (CallerPathIs(path, CALLER_PREFERENCES)) return CPCallerPreferences;
+    if (CallerPathIs(path, CALLER_APP)) return CPCallerApp;
     return CPCallerUnknown;
 }
 

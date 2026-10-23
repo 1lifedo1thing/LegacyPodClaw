@@ -71,16 +71,16 @@ static const CGFloat kTypingCellHeight = 40.0f;
     _tapDismiss.cancelsTouchesInView = NO;
     [_tableView addGestureRecognizer:_tapDismiss];
 
-    /* Batch stream updates at 10fps */
-    _streamUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
-                                                          target:self
-                                                        selector:@selector(_flushStreamUpdates)
-                                                        userInfo:nil
-                                                         repeats:YES];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+
+    /* a repeating timer retains its target, so run it only while the view is on screen */
+    if (!_streamUpdateTimer) {
+        _streamUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:0.1 target:self
+            selector:@selector(_flushStreamUpdates) userInfo:nil repeats:YES];
+    }
 
     OCSessionManager *mgr = [AppDelegate shared].sessionManager;
 
@@ -99,8 +99,14 @@ static const CGFloat kTypingCellHeight = 40.0f;
     [self _scrollToBottomAnimated:NO];
 }
 
-- (void)dealloc {
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self _flushStreamUpdates];
     [_streamUpdateTimer invalidate];
+    _streamUpdateTimer = nil;
+}
+
+- (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_tableView release]; [_inputBar release]; [_inputTextView release];
     [_sendButton release]; [_tapDismiss release]; [_statusLabel release];
@@ -211,6 +217,9 @@ static const CGFloat kTypingCellHeight = 40.0f;
             return;
         }
     }
+
+    /* the local agent runs one turn at a time; keep the text so the user can send it after the reply */
+    if (gwState != OCGatewayStateConnected && app.localAgent.isProcessing) return;
 
     _inputTextView.text = @"";
     _sendButton.enabled = NO;

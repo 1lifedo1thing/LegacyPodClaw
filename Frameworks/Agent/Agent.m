@@ -7,7 +7,9 @@
  */
 
 #import "Agent.h"
+#import "HTTPFetch.h"
 #import "ToolDispatcher.h"
+#import "ToolInputCheck.h"
 #import "ProviderRegistry.h"
 #import <UIKit/UIKit.h>
 
@@ -104,39 +106,33 @@ static const NSUInteger kDefaultMaxResponse = 1024;
     [super dealloc];
 }
 
+/* json-rpc over http or https; the reply's error member becomes an NSError */
+- (void)_rpc:(NSString *)method params:(NSDictionary *)params rpcId:(NSInteger)rpcId
+    completion:(void(^)(NSDictionary *result, NSError *error))completion {
+    NSDictionary *body = @{@"jsonrpc": @"2.0", @"method": method, @"params": params ?: @{}, @"id": @(rpcId)};
+    void (^done)(NSDictionary *, NSError *) = [[completion copy] autorelease];
+    CPFetchJSON(_serverURL, nil, body, 30, ^(id json, NSInteger status, NSError *error) {
+        if (error) { done(nil, error); return; }
+        NSDictionary *rpcError = [json isKindOfClass:[NSDictionary class]] ? [json objectForKey:@"error"] : nil;
+        if ([rpcError isKindOfClass:[NSDictionary class]]) {
+            NSString *message = [[rpcError objectForKey:@"message"] description] ?: @"MCP error";
+            done(nil, [NSError errorWithDomain:@"OCMCPClient" code:1 userInfo:@{NSLocalizedDescriptionKey: message}]);
+            return;
+        }
+        id result = [json isKindOfClass:[NSDictionary class]] ? [json objectForKey:@"result"] : nil;
+        done([result isKindOfClass:[NSDictionary class]] ? result : @{}, nil);
+    });
+}
+
 - (void)connect:(void(^)(BOOL, NSError *))callback {
-    /* Send initialize request to MCP server */
-    NSURL *url = [NSURL URLWithString:_serverURL];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    [request setHTTPMethod:@"POST"];
-    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-
-    NSDictionary *body = @{
-        @"jsonrpc": @"2.0",
-        @"method": @"initialize",
-        @"params": @{
-            @"protocolVersion": @"2024-11-05",
-            @"capabilities": @{},
-            @"clientInfo": @{
-                @"name": @"openclaw-ios6",
-                @"version": @"0.1.0"
-            }
-        },
-        @"id": @1
-    };
-
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-    [request setHTTPBody:jsonData];
-
-    [NSURLConnection sendAsynchronousRequest:request
-                                       queue:[NSOperationQueue mainQueue]
-                           completionHandler:^(NSURLResponse *resp, NSData *data, NSError *error) {
+    NSDictionary *params = @{@"protocolVersion": @"2024-11-05", @"capabilities": @{},
+                             @"clientInfo": @{@"name": @"LegacyPodClaw", @"version": @"0.4.0"}};
+    [self _rpc:@"initialize" params:params rpcId:1 completion:^(NSDictionary *result, NSError *error) {
         if (error) {
             if (callback) callback(NO, error);
             return;
         }
         _isConnected = YES;
-        /* Fetch tool list */
         [self listTools:^(NSArray *tools, NSError *err) {
             if (callback) callback(err == nil, err);
         }];
@@ -151,58 +147,17 @@ static const NSUInteger kDefaultMaxResponse = 1024;
 - (void)callTool:(NSString *)toolName
           params:(NSDictionary *)params
         callback:(OCToolResultBlock)callback {
-    NSURL *url = [NSURL URLWithString:_serverURL];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    [request setHTTPMethod:@"POST"];
-    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-
-    NSDictionary *body = @{
-        @"jsonrpc": @"2.0",
-        @"method": @"tools/call",
-        @"params": @{
-            @"name": toolName,
-            @"arguments": params ?: @{}
-        },
-        @"id": @2
-    };
-
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-    [request setHTTPBody:jsonData];
-
-    [NSURLConnection sendAsynchronousRequest:request
-                                       queue:[NSOperationQueue mainQueue]
-                           completionHandler:^(NSURLResponse *resp, NSData *data, NSError *error) {
-        if (error) { callback(nil, error); return; }
-
-        NSDictionary *result = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        NSDictionary *resultPayload = [result objectForKey:@"result"];
-        callback(resultPayload, nil);
+    [self _rpc:@"tools/call" params:@{@"name": toolName, @"arguments": params ?: @{}} rpcId:2
+    completion:^(NSDictionary *result, NSError *error) {
+        callback(result, error);
     }];
 }
 
 - (void)listTools:(void(^)(NSArray *, NSError *))callback {
-    NSURL *url = [NSURL URLWithString:_serverURL];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    [request setHTTPMethod:@"POST"];
-    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-
-    NSDictionary *body = @{
-        @"jsonrpc": @"2.0",
-        @"method": @"tools/list",
-        @"params": @{},
-        @"id": @3
-    };
-
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-    [request setHTTPBody:jsonData];
-
-    [NSURLConnection sendAsynchronousRequest:request
-                                       queue:[NSOperationQueue mainQueue]
-                           completionHandler:^(NSURLResponse *resp, NSData *data, NSError *error) {
+    [self _rpc:@"tools/list" params:@{} rpcId:3 completion:^(NSDictionary *result, NSError *error) {
         if (error) { callback(nil, error); return; }
-
-        NSDictionary *result = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        NSArray *tools = [[result objectForKey:@"result"] objectForKey:@"tools"];
+        NSArray *tools = [result objectForKey:@"tools"];
+        if (![tools isKindOfClass:[NSArray class]]) tools = @[];
         [_tools removeAllObjects];
 
         /* the handler must not retain the client, which owns the tool */
@@ -595,6 +550,9 @@ static const NSUInteger kMaxToolRounds = 8;
         } else if ([action isEqualToString:@"write"]) {
             [[UIPasteboard generalPasteboard] setString:[params objectForKey:@"text"] ?: @""];
             callback(@"Copied to clipboard", nil);
+        } else {
+            callback(nil, [NSError errorWithDomain:@"OCAgent" code:1
+                userInfo:@{NSLocalizedDescriptionKey: @"action must be read or write"}]);
         }
     };
     return tool;
@@ -614,26 +572,16 @@ static const NSUInteger kMaxToolRounds = 8;
     tool.timeout = 30.0;
     tool.handler = ^(NSDictionary *params, OCToolResultBlock callback) {
         NSString *urlStr = [params objectForKey:@"url"];
-        NSURL *url = [NSURL URLWithString:urlStr];
-        if (!url) { callback(@"Invalid URL", nil); return; }
-
-        NSURLRequest *req = [NSURLRequest requestWithURL:url
-                                             cachePolicy:NSURLRequestReloadIgnoringCacheData
-                                         timeoutInterval:30.0];
-        [NSURLConnection sendAsynchronousRequest:req
-                                           queue:[NSOperationQueue mainQueue]
-                               completionHandler:^(NSURLResponse *resp, NSData *data, NSError *err) {
+        CPFetch(urlStr, @"GET", nil, nil, 30, ^(NSData *data, NSInteger status, NSError *err) {
             if (err) { callback(nil, err); return; }
 
-            /* Limit response to 32KB to conserve memory */
+            /* limit the reply to 32KB to conserve memory */
             NSUInteger maxLen = 32768;
-            NSData *truncated = [data length] > maxLen
-                ? [data subdataWithRange:NSMakeRange(0, maxLen)]
-                : data;
+            NSData *truncated = [data length] > maxLen ? [data subdataWithRange:NSMakeRange(0, maxLen)] : data;
             NSString *text = [[NSString alloc] initWithData:truncated encoding:NSUTF8StringEncoding];
-            callback(text ?: @"[Binary data]", nil);
+            callback([NSString stringWithFormat:@"HTTP %ld\n%@", (long)status, text ?: @"[Binary data]"], nil);
             [text release];
-        }];
+        });
     };
     return tool;
 }
@@ -678,6 +626,11 @@ static const NSUInteger kMaxToolRounds = 8;
     };
     tool.handler = ^(NSDictionary *params, OCToolResultBlock callback) {
         NSString *expr = [params objectForKey:@"expression"];
+        if (!OCMathExpressionIsSafe(expr)) {
+            callback(nil, [NSError errorWithDomain:@"OCAgent" code:1
+                userInfo:@{NSLocalizedDescriptionKey: @"use only numbers, + - * / ( ) and spaces"}]);
+            return;
+        }
         @try {
             NSExpression *mathExpr = [NSExpression expressionWithFormat:expr];
             id result = [mathExpr expressionValueWithObject:nil context:nil];

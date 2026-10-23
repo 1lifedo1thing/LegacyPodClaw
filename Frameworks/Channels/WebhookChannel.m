@@ -1,5 +1,6 @@
 /* webhook channel; https callbacks go through wolfssl, plain http is for the local network only */
 
+#import "HTTPFetch.h"
 #import "WebhookChannel.h"
 #import "TLSClient.h"
 
@@ -65,23 +66,9 @@ static NSString *StringField(NSDictionary *d, NSString *key) {
     NSMutableDictionary *headers = [NSMutableDictionary dictionaryWithObject:@"application/json" forKey:@"Content-Type"];
     if ([_token length]) [headers setObject:[@"Bearer " stringByAppendingString:_token] forKey:@"Authorization"];
 
-    NSURL *url = [NSURL URLWithString:_callbackURL];
-    if ([[[url scheme] lowercaseString] isEqualToString:@"https"]) {
-        [CPTLSClient request:_callbackURL method:@"POST" headers:headers body:data
-                  completion:^(NSData *resp, NSInteger status, NSError *error) {
-            if (error || status >= 300) NSLog(@"[Webhook] callback failed: %@", error ? [error localizedDescription] : @(status));
-        }];
-        return;
-    }
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringCacheData
-                                                   timeoutInterval:20];
-    [req setHTTPMethod:@"POST"];
-    [req setHTTPBody:data];
-    for (NSString *k in headers) [req setValue:[headers objectForKey:k] forHTTPHeaderField:k];
-    [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-                           completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
-        if (e) NSLog(@"[Webhook] callback failed: %@", [e localizedDescription]);
-    }];
+    CPFetch(_callbackURL, @"POST", headers, data, 20, ^(NSData *resp, NSInteger status, NSError *error) {
+        if (error || status >= 300) NSLog(@"[Webhook] callback failed: %@", error ? [error localizedDescription] : @(status));
+    });
 }
 
 - (NSDictionary *)statusInfo {

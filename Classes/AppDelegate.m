@@ -114,7 +114,7 @@ static AppDelegate *_shared = nil;
         @"- Download songs and add to the Music library (download_music tool, requires music proxy)\n"
         @"- List songs in the music library (list_music tool)\n\n"
         @"ALWAYS use tools when the user asks you to do something on the device. "
-        @"Don't say you can't — you CAN. You have root access.\n\n"
+        @"Don't say you can't — you CAN. You run as the mobile user, not root.\n\n"
         @"Safety: /System, /sbin, /bin, /boot are protected. Check disk space before large writes. "
         @"Destructive commands need confirmation.\n\n"
         @"Be concise but thorough. Show command output when relevant.";

@@ -135,26 +135,27 @@ static const NSTimeInterval kMaxMessageAge = 600;
 - (void)sendMessage:(NSString *)text toChatId:(NSString *)chatId threadId:(NSString *)threadId {
     if ([chatId length] == 0 || [text length] == 0) return;
     /* plain text: model markdown often breaks telegram's parser and the whole send fails */
-    for (NSString *part in OCSplitText(text, kTelegramMaxChars)) {
+    OCSendPartsInOrder(OCSplitText(text, kTelegramMaxChars), ^(NSString *part, dispatch_block_t done) {
         NSMutableDictionary *body = [NSMutableDictionary dictionaryWithObjectsAndKeys:chatId, @"chat_id", part, @"text", nil];
         if (threadId) [body setObject:threadId forKey:@"message_thread_id"];
-        [self _apiCall:@"sendMessage" body:body];
-    }
+        [self _apiCall:@"sendMessage" body:body done:done];
+    });
 }
 
 - (void)sendTypingIndicator:(NSString *)chatId {
-    if ([chatId length]) [self _apiCall:@"sendChatAction" body:@{@"chat_id": chatId, @"action": @"typing"}];
+    if ([chatId length]) [self _apiCall:@"sendChatAction" body:@{@"chat_id": chatId, @"action": @"typing"} done:nil];
 }
 
 - (NSDictionary *)statusInfo {
     return @{@"polling": @(_running), @"lastError": _lastError ?: @""};
 }
 
-- (void)_apiCall:(NSString *)method body:(NSDictionary *)body {
+- (void)_apiCall:(NSString *)method body:(NSDictionary *)body done:(dispatch_block_t)done {
     NSString *url = [NSString stringWithFormat:@"%@%@/%@", kTelegramAPI, _botToken, method];
     [CPTLSClient postJSON:url headers:nil body:body completion:^(NSDictionary *json, NSError *error) {
         if (error || ![[json objectForKey:@"ok"] boolValue])
             NSLog(@"[Telegram] %@ failed: %@", method, error ? [error localizedDescription] : [json objectForKey:@"description"]);
+        if (done) done();
     }];
 }
 

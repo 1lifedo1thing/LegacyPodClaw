@@ -8,6 +8,7 @@
 
 #import "SettingsViewController.h"
 #import "AppDelegate.h"
+#import "GatewayToken.h"
 #import <notify.h>
 
 #define PREFS_PATH @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
@@ -97,7 +98,8 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
         case SettingsSectionAgent:
             return @"Used when no gateway is connected.";
         case SettingsSectionServer:
-            return @"Run the full LegacyPodClaw gateway on this device. Other devices can connect to it.";
+            return @"Run the full LegacyPodClaw gateway on this device. Other devices on your network "
+                   @"must send the access token as \"Authorization: Bearer <token>\".";
         default: return nil;
     }
 }
@@ -107,7 +109,7 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
         case SettingsSectionGateway: return 4;
         case SettingsSectionAuth:    return 2;
         case SettingsSectionAgent:   return 2;
-        case SettingsSectionServer:  return 3;
+        case SettingsSectionServer:  return 4;
         case SettingsSectionActions: return 2;
         case SettingsSectionAbout:   return 2;
         default: return 0;
@@ -223,6 +225,14 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
                     }
                     break;
                 }
+                case 3: {
+                    NSString *token = [OCGatewayToken currentToken];
+                    cell.textLabel.text = @"Access Token";
+                    cell.detailTextLabel.text = token
+                        ? [[token substringToIndex:8] stringByAppendingString:@"\u2026"] : @"Unavailable";
+                    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                    break;
+                }
             }
             break;
         }
@@ -287,6 +297,8 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
     } else if (indexPath.section == SettingsSectionServer) {
         if (indexPath.row == 1) {
             [self _showInput:@"Server Port" key:@"serverPort" placeholder:@"18789" secure:NO tag:400];
+        } else if (indexPath.row == 3) {
+            [self _showAccessToken];
         }
     } else if (indexPath.section == SettingsSectionActions) {
         if (indexPath.row == 0) {
@@ -333,7 +345,40 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
     [alert release];
 }
 
+- (void)_showAccessToken {
+    NSString *token = [OCGatewayToken currentToken];
+    UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Gateway Access Token"
+        message:token ?: @"The token file could not be created."
+        delegate:self cancelButtonTitle:@"Close" otherButtonTitles:@"Copy", @"Regenerate", nil];
+    alert.tag = 500;
+    [alert show];
+    [alert release];
+}
+
+- (void)_handleTokenAlert:(UIAlertView *)alertView button:(NSInteger)buttonIndex {
+    if (alertView.tag == 500 && buttonIndex == 1) {
+        NSString *token = [OCGatewayToken currentToken];
+        if (token) [[UIPasteboard generalPasteboard] setString:token];
+    } else if (alertView.tag == 500 && buttonIndex == 2) {
+        UIAlertView *confirm = [[UIAlertView alloc] initWithTitle:@"Regenerate Token?"
+            message:@"Every client must be updated with the new token. Connected clients are disconnected."
+            delegate:self cancelButtonTitle:@"Cancel" otherButtonTitles:@"Regenerate", nil];
+        confirm.tag = 501;
+        [confirm show];
+        [confirm release];
+    } else if (alertView.tag == 501 && buttonIndex == 1) {
+        OCGatewayServer *server = [AppDelegate shared].gatewayServer;
+        NSString *token = server.isRunning ? [server regenerateAccessToken] : [OCGatewayToken regenerateToken];
+        [self.tableView reloadData];
+        if (token) [self _showAccessToken];
+    }
+}
+
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (alertView.tag == 500 || alertView.tag == 501) {
+        [self _handleTokenAlert:alertView button:buttonIndex];
+        return;
+    }
     if (buttonIndex != 1) return;
 
     NSString *value = [[alertView textFieldAtIndex:0] text];
@@ -376,7 +421,6 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
                 OCGatewayConfig *cfg = [[[OCGatewayConfig alloc] init] autorelease];
                 NSString *portStr = [self _prefString:@"serverPort"];
                 cfg.port = [portStr length] > 0 ? [portStr intValue] : 18789;
-                cfg.authMode = @"none"; /* Can be configured later */
                 cfg.defaultApiKey = [self _prefString:@"apiKey"];
                 cfg.defaultModelId = [self _prefString:@"modelId"];
 

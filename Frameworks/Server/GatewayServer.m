@@ -15,6 +15,24 @@
 
 static const NSInteger kProtocolVersion = 3;
 static const NSTimeInterval kDefaultTickInterval = 30.0;
+static const NSUInteger kMaxWSMessageSize = 256 * 1024;
+static const NSTimeInterval kWSAuthDeadline = 10.0;
+
+static NSString *GWString(NSDictionary *dict, NSString *key) {
+    id v = [dict isKindOfClass:[NSDictionary class]] ? [dict objectForKey:key] : nil;
+    return [v isKindOfClass:[NSString class]] ? v : nil;
+}
+
+static NSDictionary *GWDict(NSDictionary *dict, NSString *key) {
+    id v = [dict isKindOfClass:[NSDictionary class]] ? [dict objectForKey:key] : nil;
+    return [v isKindOfClass:[NSDictionary class]] ? v : nil;
+}
+
+static NSUInteger GWLimit(id value, NSUInteger fallback) {
+    if (![value respondsToSelector:@selector(integerValue)]) return fallback;
+    NSInteger n = [value integerValue];
+    return (n > 0 && n <= 1000) ? (NSUInteger)n : fallback;
+}
 
 /* Base64 encoder (iOS 6 compat) */
 static NSString *GWBase64Encode(NSData *data) {
@@ -46,7 +64,6 @@ static NSString *GWGenerateUUID(void) {
     if ((self = [super init])) {
         _port = 18789;
         _bindAddress = [@"0.0.0.0" copy];
-        _authMode = [@"none" copy];
         _maxConnections = 8;
         _tickInterval = kDefaultTickInterval;
         _defaultModelId = [@"claude-sonnet-4-20250514" copy];
@@ -54,8 +71,7 @@ static NSString *GWGenerateUUID(void) {
     return self;
 }
 - (void)dealloc {
-    [_bindAddress release]; [_authMode release]; [_authToken release];
-    [_authPassword release]; [_dataDirectory release]; [_defaultModelId release];
+    [_bindAddress release]; [_dataDirectory release]; [_defaultModelId release];
     [_defaultApiKey release]; [_defaultBaseURL release]; [_telegramBotToken release];
     [_telegramAllowedChatIds release];
     [super dealloc];
@@ -76,12 +92,14 @@ static NSString *GWGenerateUUID(void) {
 - (void)dealloc {
     [_connectionId release]; [_clientId release]; [_displayName release];
     [_platform release]; [_role release]; [_scopes release];
-    [_connectedAt release]; [_outputStream release]; [_inputStream release];
-    [_webSocket release]; [_subscribedSessions release];
+    [_connectedAt release]; [_webSocket release]; [_subscribedSessions release];
     [super dealloc];
 }
 - (void)sendJSON:(NSDictionary *)json {
+    // dataWithJSONObject throws on non-json values, which would take the app down
+    if (![NSJSONSerialization isValidJSONObject:json]) return;
     NSData *data = [NSJSONSerialization dataWithJSONObject:json options:0 error:nil];
+    if (!data) return;
     NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     [_webSocket sendText:text];
     [text release];
@@ -138,7 +156,7 @@ static NSString *GWGenerateUUID(void) {
 
 #pragma mark - Gateway Server
 
-@interface OCGatewayServer () <OCWebSocketDelegate> {
+@interface OCGatewayServer () {
     OCHTTPServer *_httpServer;
     OCStore *_store;
     OCKeyValueStore *_kvStore;
@@ -154,9 +172,6 @@ static NSString *GWGenerateUUID(void) {
     NSTimer *_cronTimer;
     NSDate *_startedAt;
     NSUInteger _seqCounter;
-
-    /* WS server: client sockets waiting for handshake */
-    NSMutableDictionary *_pendingWSClients; // connId -> {input, output, request, ws}
 }
 @end
 
@@ -170,7 +185,6 @@ static NSString *GWGenerateUUID(void) {
         _sessionHistory = [[NSMutableDictionary alloc] initWithCapacity:16];
         _cronJobs = [[NSMutableArray alloc] initWithCapacity:4];
         _activeRuns = [[NSMutableDictionary alloc] initWithCapacity:4];
-        _pendingWSClients = [[NSMutableDictionary alloc] initWithCapacity:4];
         _seqCounter = 0;
     }
     return self;
@@ -180,7 +194,7 @@ static NSString *GWGenerateUUID(void) {
     [self stop];
     [_config release]; [_clients release]; [_sessionEntries release];
     [_sessionHistory release]; [_cronJobs release]; [_activeRuns release];
-    [_pendingWSClients release]; [_httpServer release]; [_store release];
+    [_httpServer release]; [_store release];
     [_kvStore release]; [_agent release]; [_startedAt release];
     [super dealloc];
 }
@@ -189,6 +203,13 @@ static NSString *GWGenerateUUID(void) {
 
 - (BOOL)start:(NSError **)error {
     if (_isRunning) return YES;
+
+    // without a token every request would be refused, so refuse to start instead
+    if (![OCGatewayToken currentToken]) {
+        if (error) *error = [NSError errorWithDomain:@"OCGatewayServer" code:-10
+            userInfo:@{NSLocalizedDescriptionKey: @"Could not create the gateway access token"}];
+        return NO;
+    }
 
     /* Ensure data directory */
     NSString *dataDir = _config.dataDirectory;
@@ -238,13 +259,17 @@ static NSString *GWGenerateUUID(void) {
     _httpServer.port = _config.port;
     _httpServer.bindAddress = _config.bindAddress;
     _httpServer.maxConnections = _config.maxConnections + 8; /* Extra for HTTP */
+    _httpServer.authorizer = ^BOOL(OCHTTPRequest *req) {
+        return [OCGatewayToken isValidToken:[req bearerToken]];
+    };
 
     [self _registerHTTPRoutes];
+    __unsafe_unretained OCGatewayServer *upgradeSelf = self;
     [_httpServer onWebSocketUpgrade:^(OCHTTPRequest *request,
-                                       CFSocketNativeHandle socket,
                                        NSInputStream *input,
-                                       NSOutputStream *output) {
-        [self _handleWSUpgrade:request socket:socket input:input output:output];
+                                       NSOutputStream *output,
+                                       NSData *pendingData) {
+        [upgradeSelf _handleWSUpgrade:request input:input output:output pendingData:pendingData];
     }];
 
     if (![_httpServer start:error]) return NO;
@@ -286,8 +311,9 @@ static NSString *GWGenerateUUID(void) {
 
     /* Disconnect all clients */
     for (OCGatewayWSClient *client in [_clients allValues]) {
-        [client sendEvent:@"shutdown" payload:@{@"reason": @"server_stopping"}];
-        [client.webSocket close];
+        client.webSocket.delegate = nil;
+        if (client.authenticated) [client sendEvent:@"shutdown" payload:@{@"reason": @"server_stopping"}];
+        [client.webSocket closeWithCode:1001 reason:@"server stopping"];
     }
     [_clients removeAllObjects];
 
@@ -308,15 +334,14 @@ static NSString *GWGenerateUUID(void) {
 - (void)_registerHTTPRoutes {
     __unsafe_unretained OCGatewayServer *weakSelf = self;
 
-    /* Health */
+    // liveness only: no body, so an unauthenticated scan learns nothing beyond the open port
+    [_httpServer publicGet:@"/healthz" handler:^(OCHTTPRequest *req, void(^respond)(OCHTTPResponse *)) {
+        respond([OCHTTPResponse responseWithStatus:204]);
+    }];
+
     [_httpServer get:@"/health" handler:^(OCHTTPRequest *req, void(^respond)(OCHTTPResponse *)) {
+        if (![weakSelf _authHTTP:req respond:respond]) return;
         respond([OCHTTPResponse jsonResponse:[weakSelf healthStatus]]);
-    }];
-    [_httpServer get:@"/healthz" handler:^(OCHTTPRequest *req, void(^respond)(OCHTTPResponse *)) {
-        respond([OCHTTPResponse jsonResponse:@{@"ok": @YES, @"status": @"live"}]);
-    }];
-    [_httpServer get:@"/ready" handler:^(OCHTTPRequest *req, void(^respond)(OCHTTPResponse *)) {
-        respond([OCHTTPResponse jsonResponse:@{@"ok": @YES, @"status": @"ready"}]);
     }];
 
     /* Sessions HTTP API */
@@ -332,25 +357,28 @@ static NSString *GWGenerateUUID(void) {
     [_httpServer get:@"/api/sessions/*" handler:^(OCHTTPRequest *req, void(^respond)(OCHTTPResponse *)) {
         if (![weakSelf _authHTTP:req respond:respond]) return;
         /* Extract session key from path: /api/sessions/{key}/history */
-        NSString *path = req.path;
-        NSArray *parts = [path componentsSeparatedByString:@"/"];
-        if ([parts count] >= 4) {
-            NSString *key = [parts objectAtIndex:3];
-            NSDictionary *params = [req queryParams];
-            NSUInteger limit = [[params objectForKey:@"limit"] integerValue] ?: 100;
-            NSArray *msgs = [weakSelf historyForSession:key limit:limit];
-            respond([OCHTTPResponse jsonResponse:@{@"sessionKey": key, @"messages": msgs ?: @[]}]);
-        } else {
+        NSArray *parts = [req.path componentsSeparatedByString:@"/"];
+        NSString *key = [parts count] >= 4 ? [parts objectAtIndex:3] : nil;
+        if ([key length] == 0 || [key length] > 128) {
             respond([OCHTTPResponse errorResponse:400 message:@"Invalid session path"]);
+            return;
         }
+        NSUInteger limit = GWLimit([[req queryParams] objectForKey:@"limit"], 100);
+        NSArray *msgs = [weakSelf historyForSession:key limit:limit];
+        respond([OCHTTPResponse jsonResponse:@{@"sessionKey": key, @"messages": msgs ?: @[]}]);
     }];
 
     /* Tool invoke */
     [_httpServer post:@"/tools/invoke" handler:^(OCHTTPRequest *req, void(^respond)(OCHTTPResponse *)) {
         if (![weakSelf _authHTTP:req respond:respond]) return;
         NSDictionary *body = [req jsonBody];
-        NSString *toolName = [body objectForKey:@"tool"];
-        NSDictionary *args = [body objectForKey:@"args"] ?: @{};
+        NSString *toolName = GWString(body, @"tool");
+        id rawArgs = [body objectForKey:@"args"];
+        if (rawArgs && ![rawArgs isKindOfClass:[NSDictionary class]]) {
+            respond([OCHTTPResponse errorResponse:400 message:@"'args' must be an object"]);
+            return;
+        }
+        NSDictionary *args = rawArgs ?: @{};
 
         if (!toolName) {
             respond([OCHTTPResponse errorResponse:400 message:@"Missing 'tool' parameter"]);
@@ -369,7 +397,7 @@ static NSString *GWGenerateUUID(void) {
 
         tool.handler(args, ^(id result, NSError *error) {
             if (error) {
-                respond([OCHTTPResponse jsonResponse:@{@"ok": @NO, @"error": [error localizedDescription]}]);
+                respond([OCHTTPResponse jsonResponse:@{@"ok": @NO, @"error": [error localizedDescription] ?: @""}]);
             } else {
                 respond([OCHTTPResponse jsonResponse:@{@"ok": @YES, @"output": result ?: [NSNull null]}]);
             }
@@ -394,29 +422,57 @@ static NSString *GWGenerateUUID(void) {
 }
 
 - (BOOL)_authHTTP:(OCHTTPRequest *)req respond:(void(^)(OCHTTPResponse *))respond {
-    if ([_config.authMode isEqualToString:@"none"]) return YES;
-
-    NSString *token = [req bearerToken];
-    if ([_config.authMode isEqualToString:@"token"]) {
-        if ([token isEqualToString:_config.authToken]) return YES;
-    } else if ([_config.authMode isEqualToString:@"password"]) {
-        if ([token isEqualToString:_config.authPassword]) return YES;
-    }
-
-    respond([OCHTTPResponse errorResponse:401 message:@"Unauthorized"]);
+    // the http layer enforces this already; repeating it guards against a route registered as public by mistake
+    if (req.authorized) return YES;
+    OCHTTPResponse *resp = [OCHTTPResponse errorResponse:401 message:@"Unauthorized"];
+    [resp.headers setObject:@"Bearer" forKey:@"WWW-Authenticate"];
+    respond(resp);
     return NO;
+}
+
+#pragma mark - Access Token
+
+- (NSString *)accessToken {
+    return [OCGatewayToken currentToken];
+}
+
+- (NSString *)regenerateAccessToken {
+    NSString *token = [OCGatewayToken regenerateToken];
+    if (!token) return nil;
+    for (OCGatewayWSClient *client in [_clients allValues]) {
+        [client.webSocket closeWithCode:1008 reason:@"token changed"];
+    }
+    return token;
 }
 
 #pragma mark - WebSocket Upgrade & Protocol
 
-- (void)_handleWSUpgrade:(OCHTTPRequest *)request
-                   socket:(CFSocketNativeHandle)socket
-                    input:(NSInputStream *)input
-                   output:(NSOutputStream *)output {
+static NSData *GWHTTPError(NSInteger status, NSString *text) {
+    NSString *s = [NSString stringWithFormat:
+        @"HTTP/1.1 %ld %@\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", (long)status, text];
+    return [s dataUsingEncoding:NSUTF8StringEncoding];
+}
 
-    /* Complete WebSocket handshake */
+- (void)_handleWSUpgrade:(OCHTTPRequest *)request
+                   input:(NSInputStream *)input
+                  output:(NSOutputStream *)output
+             pendingData:(NSData *)pendingData {
+
+    OCServerWebSocket *ws = [[[OCServerWebSocket alloc] initWithInputStream:input
+                                                               outputStream:output
+                                                                pendingData:pendingData] autorelease];
+    ws.maxMessageSize = kMaxWSMessageSize;
+
     NSString *wsKey = [request headerValue:@"Sec-WebSocket-Key"];
-    if (!wsKey) return;
+    NSString *wsVersion = [request headerValue:@"Sec-WebSocket-Version"];
+    if ([wsKey length] == 0 || [wsKey length] > 64 || ![wsVersion isEqualToString:@"13"]) {
+        [ws rejectWithResponse:GWHTTPError(400, @"Bad Request")];
+        return;
+    }
+    if ([_clients count] >= MAX(_config.maxConnections, (NSUInteger)1)) {
+        [ws rejectWithResponse:GWHTTPError(503, @"Service Unavailable")];
+        return;
+    }
 
     /* Compute accept key */
     NSString *guid = @"258EAFA5-E914-47DA-95CA-5AB5DC11695A";
@@ -427,7 +483,6 @@ static NSString *GWGenerateUUID(void) {
     NSData *sha1Data = [NSData dataWithBytes:sha1 length:CC_SHA1_DIGEST_LENGTH];
     NSString *acceptKey = GWBase64Encode(sha1Data);
 
-    /* Send upgrade response */
     NSString *response = [NSString stringWithFormat:
         @"HTTP/1.1 101 Switching Protocols\r\n"
         @"Upgrade: websocket\r\n"
@@ -435,42 +490,29 @@ static NSString *GWGenerateUUID(void) {
         @"Sec-WebSocket-Accept: %@\r\n"
         @"\r\n", acceptKey];
 
-    NSData *respData = [response dataUsingEncoding:NSUTF8StringEncoding];
-    [output write:[respData bytes] maxLength:[respData length]];
-
-    /* Create WS client */
-    OCGatewayWSClient *client = [[OCGatewayWSClient alloc] init];
-    client.inputStream = input;
-    client.outputStream = output;
-
-    /* Create a WebSocket wrapper that uses existing streams */
-    /* For the server side, we need to receive frames directly */
-    /* We'll use the OCWebSocket in a server-compatible mode */
-    NSString *wsURLStr = [NSString stringWithFormat:@"ws://localhost:%d/", _config.port];
-    NSURL *wsURL = [NSURL URLWithString:wsURLStr];
-    OCWebSocket *ws = [[OCWebSocket alloc] initWithURL:wsURL];
-    /* Note: In server mode we don't call [ws open] - the connection is already established */
+    OCGatewayWSClient *client = [[[OCGatewayWSClient alloc] init] autorelease];
     client.webSocket = ws;
-    [ws release];
-
-    /* For now, use raw stream I/O for the server-side WebSocket */
-    /* We'll handle frame parsing manually for incoming data */
-    [input setDelegate:(id)self];
-    [output setDelegate:(id)self];
-    [input scheduleInRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    [output scheduleInRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-
-    /* Store client pending auth */
+    client.tokenVerified = request.authorized;
+    ws.delegate = self;
     [_clients setObject:client forKey:client.connectionId];
 
+    [ws startWithHandshakeResponse:[response dataUsingEncoding:NSUTF8StringEncoding]];
+
     /* Send challenge */
-    NSString *nonce = GWGenerateUUID();
     [client sendEvent:@"connect.challenge" payload:@{
-        @"nonce": nonce,
-        @"ts": @((NSUInteger)([[NSDate date] timeIntervalSince1970] * 1000))
+        @"nonce": GWGenerateUUID(),
+        @"ts": @((unsigned long long)([[NSDate date] timeIntervalSince1970] * 1000))
     }];
 
-    [client release];
+    // an idle socket that never authenticates would otherwise hold a client slot indefinitely
+    NSString *connId = [[client.connectionId copy] autorelease];
+    [self retain];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kWSAuthDeadline * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        OCGatewayWSClient *c = [_clients objectForKey:connId];
+        if (c && !c.authenticated) [c.webSocket closeWithCode:1008 reason:@"authentication timeout"];
+        [self release];
+    });
 
     NSLog(@"[Gateway] WebSocket client connected: %@", request.remoteAddress);
 }
@@ -478,21 +520,32 @@ static NSString *GWGenerateUUID(void) {
 #pragma mark - WS Message Handling
 
 - (void)_handleWSMessage:(NSString *)message fromClient:(OCGatewayWSClient *)client {
+    BOOL first = !client.receivedFirstFrame;
+    client.receivedFirstFrame = YES;
+
     NSData *data = [message dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary *frame = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    id parsed = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSDictionary *frame = [parsed isKindOfClass:[NSDictionary class]] ? parsed : nil;
+    BOOL isConnect = frame && [GWString(frame, @"type") isEqualToString:@"req"] &&
+                     [GWString(frame, @"method") isEqualToString:@"connect"];
+
+    // without a header token the first frame must be connect, so nothing else is acted on before auth
+    if (!client.authenticated && !client.tokenVerified && (!first || !isConnect)) {
+        [client.webSocket closeWithCode:1008 reason:@"authentication required"];
+        return;
+    }
     if (!frame) return;
 
-    NSString *type = [frame objectForKey:@"type"];
-
-    if ([type isEqualToString:@"req"]) {
+    if ([GWString(frame, @"type") isEqualToString:@"req"]) {
         [self _handleRequest:frame fromClient:client];
     }
 }
 
 - (void)_handleRequest:(NSDictionary *)frame fromClient:(OCGatewayWSClient *)client {
-    NSString *reqId = [frame objectForKey:@"id"];
-    NSString *method = [frame objectForKey:@"method"];
-    NSDictionary *params = [frame objectForKey:@"params"] ?: @{};
+    NSString *reqId = GWString(frame, @"id");
+    NSString *method = GWString(frame, @"method");
+    id rawParams = [frame objectForKey:@"params"];
+    NSDictionary *params = [rawParams isKindOfClass:[NSDictionary class]] ? rawParams : @{};
 
     if (!reqId || !method) return;
 
@@ -528,28 +581,29 @@ static NSString *GWGenerateUUID(void) {
         [self _handleChatAbort:params reqId:reqId client:client];
     }
     else if ([method isEqualToString:@"sessions.delete"]) {
-        NSString *key = [params objectForKey:@"key"];
+        NSString *key = GWString(params, @"key");
         if (key) [self deleteSession:key];
         [self _sendOk:reqId payload:@{} client:client];
     }
     else if ([method isEqualToString:@"sessions.reset"]) {
-        NSString *key = [params objectForKey:@"key"];
+        NSString *key = GWString(params, @"key");
         if (key) [self resetSession:key];
         [self _sendOk:reqId payload:@{} client:client];
     }
     else if ([method isEqualToString:@"sessions.messages.subscribe"]) {
-        NSString *sk = [params objectForKey:@"sessionKey"];
-        if (sk) [client.subscribedSessions addObject:sk];
+        NSString *sk = GWString(params, @"sessionKey");
+        // each entry costs memory for the life of the socket, so cap them
+        if (sk && [client.subscribedSessions count] < 64) [client.subscribedSessions addObject:sk];
         [self _sendOk:reqId payload:@{} client:client];
     }
     else if ([method isEqualToString:@"sessions.messages.unsubscribe"]) {
-        NSString *sk = [params objectForKey:@"sessionKey"];
+        NSString *sk = GWString(params, @"sessionKey");
         if (sk) [client.subscribedSessions removeObject:sk];
         [self _sendOk:reqId payload:@{} client:client];
     }
     else if ([method isEqualToString:@"gateway.identity.get"]) {
         [self _sendOk:reqId payload:@{
-            @"name": [[UIDevice currentDevice] name],
+            @"name": [[UIDevice currentDevice] name] ?: @"",
             @"version": @"0.1.0",
             @"platform": @"ios6-ipod4"
         } client:client];
@@ -566,57 +620,35 @@ static NSString *GWGenerateUUID(void) {
         [self _sendOk:reqId payload:@{@"tools": tools} client:client];
     }
     else {
-        [self _sendError:reqId code:@"INVALID_REQUEST"
-                 message:[NSString stringWithFormat:@"Unknown method: %@", method] client:client];
+        [self _sendError:reqId code:@"INVALID_REQUEST" message:@"Unknown method" client:client];
     }
 }
 
 #pragma mark - Auth
 
 - (void)_handleConnect:(NSDictionary *)params reqId:(NSString *)reqId client:(OCGatewayWSClient *)client {
-    /* Parse client info */
-    NSDictionary *clientInfo = [params objectForKey:@"client"];
-    if (clientInfo) {
-        client.clientId = [clientInfo objectForKey:@"id"];
-        client.displayName = [clientInfo objectForKey:@"displayName"];
-        client.platform = [clientInfo objectForKey:@"platform"];
-    }
-
-    /* Auth check */
-    NSDictionary *auth = [params objectForKey:@"auth"];
-    BOOL authOk = NO;
-
-    if ([_config.authMode isEqualToString:@"none"]) {
-        authOk = YES;
-    } else if ([_config.authMode isEqualToString:@"token"]) {
-        NSString *token = [auth objectForKey:@"token"];
-        authOk = (token && [token isEqualToString:_config.authToken]);
-    } else if ([_config.authMode isEqualToString:@"password"]) {
-        NSString *pw = [auth objectForKey:@"password"];
-        authOk = (pw && [pw isEqualToString:_config.authPassword]);
-    }
-
-    /* Also accept deviceToken or bootstrapToken */
-    if (!authOk) {
-        NSString *dt = [auth objectForKey:@"deviceToken"];
-        NSString *bt = [auth objectForKey:@"bootstrapToken"];
-        if (dt && [dt length] > 0) authOk = YES; /* Accept any device token for now */
-        if (bt && [bt length] > 0) authOk = YES;
-    }
+    NSDictionary *auth = GWDict(params, @"auth");
+    BOOL authOk = client.authenticated || client.tokenVerified ||
+                  [OCGatewayToken isValidToken:GWString(auth, @"token")];
 
     if (!authOk) {
         [self _sendError:reqId code:@"UNAUTHORIZED" message:@"Authentication failed" client:client];
+        [client.webSocket closeWithCode:1008 reason:@"authentication failed"];
         return;
     }
 
+    NSDictionary *clientInfo = GWDict(params, @"client");
+    if (clientInfo) {
+        client.clientId = GWString(clientInfo, @"id");
+        client.displayName = GWString(clientInfo, @"displayName");
+        client.platform = GWString(clientInfo, @"platform");
+    }
+
     client.authenticated = YES;
-    client.role = [params objectForKey:@"role"] ?: @"operator";
-    client.scopes = [params objectForKey:@"scopes"] ?: @[@"operator.admin"];
+    client.role = GWString(params, @"role") ?: @"operator";
+    id scopes = [params objectForKey:@"scopes"];
+    client.scopes = [scopes isKindOfClass:[NSArray class]] ? scopes : @[@"operator.admin"];
 
-    /* Generate device token for client */
-    NSString *deviceToken = GWGenerateUUID();
-
-    /* Build hello-ok response */
     NSDictionary *payload = @{
         @"type": @"hello-ok",
         @"protocol": @(kProtocolVersion),
@@ -633,12 +665,11 @@ static NSString *GWGenerateUUID(void) {
             @"events": @[@"tick", @"chat.event", @"sessions.changed", @"shutdown"]
         },
         @"policy": @{
-            @"maxPayload": @(16 * 1024 * 1024),
-            @"maxBufferedBytes": @(32 * 1024 * 1024),
+            @"maxPayload": @(kMaxWSMessageSize),
+            @"maxBufferedBytes": @(2 * 1024 * 1024),
             @"tickIntervalMs": @((NSUInteger)(_config.tickInterval * 1000))
         },
         @"auth": @{
-            @"deviceToken": deviceToken,
             @"role": client.role ?: @"operator",
             @"scopes": client.scopes ?: @[]
         }
@@ -648,10 +679,12 @@ static NSString *GWGenerateUUID(void) {
 
     NSLog(@"[Gateway] Client authenticated: %@ (%@)", client.displayName, client.platform);
 
+    [client retain];
     dispatch_async(dispatch_get_main_queue(), ^{
         if ([_delegate respondsToSelector:@selector(gatewayServer:didAcceptClient:)]) {
             [_delegate gatewayServer:self didAcceptClient:client];
         }
+        [client release];
     });
 }
 
@@ -666,15 +699,15 @@ static NSString *GWGenerateUUID(void) {
 }
 
 - (void)_handleSessionsCreate:(NSDictionary *)params reqId:(NSString *)reqId client:(OCGatewayWSClient *)client {
-    NSString *name = [params objectForKey:@"displayName"] ?: @"New Chat";
+    NSString *name = GWString(params, @"displayName") ?: @"New Chat";
     OCGatewaySessionEntry *session = [self createSession:name];
     [self _sendOk:reqId payload:@{@"key": session.sessionKey, @"sessionKey": session.sessionKey} client:client];
     [self broadcastEvent:@"sessions.changed" payload:@{@"action": @"created", @"key": session.sessionKey}];
 }
 
 - (void)_handleChatSend:(NSDictionary *)params reqId:(NSString *)reqId client:(OCGatewayWSClient *)client {
-    NSString *sessionKey = [params objectForKey:@"key"] ?: [params objectForKey:@"sessionKey"];
-    NSString *message = [params objectForKey:@"message"];
+    NSString *sessionKey = GWString(params, @"key") ?: GWString(params, @"sessionKey");
+    NSString *message = GWString(params, @"message");
 
     if (!sessionKey || !message) {
         [self _sendError:reqId code:@"INVALID_REQUEST" message:@"Missing key or message" client:client];
@@ -711,14 +744,14 @@ static NSString *GWGenerateUUID(void) {
 }
 
 - (void)_handleChatHistory:(NSDictionary *)params reqId:(NSString *)reqId client:(OCGatewayWSClient *)client {
-    NSString *sessionKey = [params objectForKey:@"sessionKey"];
-    NSUInteger limit = [[params objectForKey:@"limit"] unsignedIntegerValue] ?: 100;
+    NSString *sessionKey = GWString(params, @"sessionKey");
+    NSUInteger limit = GWLimit([params objectForKey:@"limit"], 100);
     NSArray *msgs = [self historyForSession:sessionKey limit:limit];
     [self _sendOk:reqId payload:@{@"messages": msgs ?: @[]} client:client];
 }
 
 - (void)_handleChatAbort:(NSDictionary *)params reqId:(NSString *)reqId client:(OCGatewayWSClient *)client {
-    NSString *sessionKey = [params objectForKey:@"sessionKey"];
+    NSString *sessionKey = GWString(params, @"sessionKey");
     if (sessionKey) [self abortSession:sessionKey];
     [self _sendOk:reqId payload:@{} client:client];
 }
@@ -935,8 +968,7 @@ static NSString *GWGenerateUUID(void) {
 - (void)startTelegramChannel {
     /* TODO: Implement Telegram bot polling via HTTP long-poll */
     if (!_config.telegramBotToken) return;
-    NSLog(@"[Gateway] Telegram channel would start with token: %@...",
-          [_config.telegramBotToken substringToIndex:MIN(10, [_config.telegramBotToken length])]);
+    NSLog(@"[Gateway] Telegram channel would start");
 }
 
 - (void)stopTelegramChannel {
@@ -1062,43 +1094,34 @@ static NSString *GWGenerateUUID(void) {
     NSLog(@"[Gateway] HTTP server error: %@", error);
 }
 
-#pragma mark - OCWebSocketDelegate (server-side stubs)
+#pragma mark - OCServerWebSocketDelegate
 
-- (void)webSocketDidOpen:(OCWebSocket *)ws {
-    /* Server-side: connection already established via HTTP upgrade */
-}
-
-- (void)webSocket:(OCWebSocket *)ws didReceiveMessage:(NSString *)message {
-    /* Find client for this websocket and route message */
+- (OCGatewayWSClient *)_clientForSocket:(OCServerWebSocket *)ws {
     for (OCGatewayWSClient *client in [_clients allValues]) {
-        if (client.webSocket == ws) {
-            [self _handleWSMessage:message fromClient:client];
-            return;
-        }
+        if (client.webSocket == ws) return client;
     }
+    return nil;
 }
 
-- (void)webSocket:(OCWebSocket *)ws didCloseWithCode:(OCWSCloseCode)code
-           reason:(NSString *)reason wasClean:(BOOL)wasClean {
-    for (NSString *connId in [_clients allKeys]) {
-        OCGatewayWSClient *client = [_clients objectForKey:connId];
-        if (client.webSocket == ws) {
-            NSLog(@"[Gateway] Client disconnected: %@", client.displayName);
-            [_clients removeObjectForKey:connId];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if ([_delegate respondsToSelector:@selector(gatewayServer:didDisconnectClient:)]) {
-                    [_delegate gatewayServer:self didDisconnectClient:client];
-                }
-            });
-            return;
-        }
-    }
+- (void)serverWebSocket:(OCServerWebSocket *)ws didReceiveText:(NSString *)text {
+    OCGatewayWSClient *client = [self _clientForSocket:ws];
+    if (client) [self _handleWSMessage:text fromClient:client];
 }
 
-- (void)webSocket:(OCWebSocket *)ws didFailWithError:(NSError *)error {
-    NSLog(@"[Gateway] WebSocket error: %@", error);
-    /* Remove the client */
-    [self webSocket:ws didCloseWithCode:1006 reason:@"Error" wasClean:NO];
+- (void)serverWebSocketDidClose:(OCServerWebSocket *)ws {
+    OCGatewayWSClient *client = [[[self _clientForSocket:ws] retain] autorelease];
+    ws.delegate = nil;
+    if (!client) return;
+    NSLog(@"[Gateway] Client disconnected: %@", client.displayName);
+    [_clients removeObjectForKey:client.connectionId];
+    if (!client.authenticated) return;
+    [client retain];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if ([_delegate respondsToSelector:@selector(gatewayServer:didDisconnectClient:)]) {
+            [_delegate gatewayServer:self didDisconnectClient:client];
+        }
+        [client release];
+    });
 }
 
 @end

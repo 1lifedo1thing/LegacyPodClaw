@@ -11,7 +11,8 @@
 
 #import <Foundation/Foundation.h>
 #import "HTTPServer.h"
-#import "WebSocket.h"
+#import "ServerWebSocket.h"
+#import "GatewayToken.h"
 #import "Store.h"
 #import "Agent.h"
 #import "MemoryPool.h"
@@ -21,9 +22,6 @@
 @interface OCGatewayConfig : NSObject
 @property (nonatomic, assign) uint16_t port;             // Default 18789
 @property (nonatomic, copy) NSString *bindAddress;       // Default 0.0.0.0
-@property (nonatomic, copy) NSString *authMode;          // "none", "token", "password"
-@property (nonatomic, copy) NSString *authToken;
-@property (nonatomic, copy) NSString *authPassword;
 @property (nonatomic, copy) NSString *dataDirectory;     // Session/config storage
 @property (nonatomic, assign) NSUInteger maxConnections;  // Default 8
 @property (nonatomic, assign) NSTimeInterval tickInterval; // Default 30s
@@ -48,10 +46,11 @@
 @property (nonatomic, copy) NSString *role;          // "operator", "node"
 @property (nonatomic, copy) NSArray *scopes;
 @property (nonatomic, assign) BOOL authenticated;
+// true when the upgrade request already carried a valid bearer token
+@property (nonatomic, assign) BOOL tokenVerified;
+@property (nonatomic, assign) BOOL receivedFirstFrame;
 @property (nonatomic, retain) NSDate *connectedAt;
-@property (nonatomic, retain) NSOutputStream *outputStream;
-@property (nonatomic, retain) NSInputStream *inputStream;
-@property (nonatomic, retain) OCWebSocket *webSocket;
+@property (nonatomic, retain) OCServerWebSocket *webSocket;
 
 /* Subscriptions */
 @property (nonatomic, retain) NSMutableSet *subscribedSessions;
@@ -105,7 +104,7 @@
 
 #pragma mark - Gateway Server
 
-@interface OCGatewayServer : NSObject <OCHTTPServerDelegate, OCAgentDelegate>
+@interface OCGatewayServer : NSObject <OCHTTPServerDelegate, OCAgentDelegate, OCServerWebSocketDelegate>
 
 @property (nonatomic, assign) id<OCGatewayServerDelegate> delegate;
 @property (nonatomic, retain) OCGatewayConfig *config;
@@ -153,5 +152,10 @@
 
 /* Health */
 - (NSDictionary *)healthStatus;
+
+// the settings screen shows this so the user can copy it into a client
+- (NSString *)accessToken;
+// a new token must also cut off sessions that authenticated with the old one
+- (NSString *)regenerateAccessToken;
 
 @end

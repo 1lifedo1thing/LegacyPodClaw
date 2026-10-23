@@ -209,7 +209,8 @@ static NSString *LPCAnthropicModel(NSDictionary *prefs) {
 
         /* Panel - slides up from bottom, rounded top corners */
         _panel = [[UIView alloc] initWithFrame:CGRectMake(0, h, w, PANEL_HEIGHT)];
-        _panel.backgroundColor = [UIColor colorWithRed:0.06f green:0.06f blue:0.10f alpha:0.96f];
+        /* opaque, or the app underneath shows through the reply text */
+        _panel.backgroundColor = [UIColor colorWithRed:0.06f green:0.06f blue:0.10f alpha:1.0f];
         CAShapeLayer *mask = [CAShapeLayer layer];
         mask.path = [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, w, PANEL_HEIGHT)
             byRoundingCorners:(UIRectCornerTopLeft | UIRectCornerTopRight)

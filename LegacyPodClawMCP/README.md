@@ -26,7 +26,7 @@ MCP (Model Context Protocol) development tools for LegacyPodClaw / iOS 6 jailbre
 ### Class Dump
 | Tool | Description |
 |------|-------------|
-| `class_dump` | Download binary from device and class-dump it |
+| `class_dump` | Download binary from device and class-dump it into the work directory |
 | `class_dump_list_headers` | List headers from a previous dump |
 | `class_dump_read_header` | Read a specific dumped header |
 
@@ -52,8 +52,20 @@ MCP (Model Context Protocol) development tools for LegacyPodClaw / iOS 6 jailbre
 ## Setup
 
 ```bash
-pip3 install mcp paramiko
+pip3 install mcp==1.30.0
+brew install sshpass libimobiledevice
 ```
+
+`mcp` 2.x removed `FastMCP`, so keep the 1.x pin until the server is ported.
+
+### Safety rules
+
+- Local processes always run from an argument list, never through a shell.
+- Every tool argument that reaches the device shell is quoted. `device_ssh` is the one exception: it runs the command you give it on the device.
+- Local files that tools write must be inside `CLAWPOD_WORKDIR`. Local files that tools read must be inside `CLAWPOD_WORKDIR` or `CLAWPOD_PROJECT`.
+- `theos_*` tools build only inside `CLAWPOD_PROJECT`, because `make` runs arbitrary code.
+- The SSH password goes to `sshpass -e` in the environment, so it is not in the process list. Tool results are scrubbed of it.
+- The device host key is pinned on first use in `CLAWPOD_WORKDIR/known_hosts`. If you swap devices on the same port, delete that file.
 
 ### Environment Variables
 
@@ -66,6 +78,7 @@ pip3 install mcp paramiko
 | `THEOS` | `~/theos` | Theos installation path |
 | `IOS6_HEADERS` | `~/iOS-6-Headers` | iOS 6 headers path |
 | `CLAWPOD_PROJECT` | `~/openclaw-ios6` | LegacyPodClaw project directory |
+| `CLAWPOD_WORKDIR` | `~/.legacypodclaw-mcp` | Downloads, class dumps and known_hosts (mode 0700) |
 
 ## Usage with Claude Code
 
@@ -88,3 +101,18 @@ Then ask Claude to interact with your device:
 - "Build and install LegacyPodClaw on the device"
 - "Class-dump SpringBoard and find camera-related methods"
 - "Read the crash log from the latest crash"
+
+## Music proxy
+
+`music_proxy.py` runs yt-dlp and ffmpeg for the iPod.
+
+```bash
+pip3 install yt-dlp==2026.8.19
+brew install ffmpeg
+python3 music_proxy.py --host 0.0.0.0
+```
+
+- The proxy binds `127.0.0.1` by default. Use `--host` or `MUSIC_PROXY_HOST` to serve the LAN.
+- On a non-loopback address the proxy requires a token. It makes the token on first run and keeps it in `~/.config/legacypodclaw/music_proxy.token` (mode 0600). Set `MUSIC_PROXY_CONFIG_DIR` to move it.
+- Set the Music Proxy URL on the iPod to `http://YOUR_IP:18790/t/TOKEN`. Other clients can send `Authorization: Bearer TOKEN`.
+- The proxy accepts only 11-character YouTube video IDs, runs at most two jobs at a time, and refuses audio longer than one hour or larger than 100 MB.

@@ -10,6 +10,9 @@
 #import "MemoryPool.h"
 #import "Agent.h"
 #import "GatewayServer.h"
+#import "ChannelManager.h"
+#import "ChannelRouter.h"
+#import "PluginSDK.h"
 
 @class OCRootViewController;
 
@@ -27,9 +30,15 @@
 @property (nonatomic, retain) OCKeyValueStore *settings;
 @property (nonatomic, retain) OCAgent *localAgent;
 @property (nonatomic, retain) OCGatewayServer *gatewayServer;
+@property (nonatomic, readonly) OCChannelManager *channelManager;
+@property (nonatomic, readonly) OCPluginManager *pluginManager;
 
 /* Singleton access */
 + (AppDelegate *)shared;
+
+/* Gateway server on this device */
+- (BOOL)startGatewayServer:(NSError **)error;
+- (void)stopGatewayServer;
 
 /* Connection */
 - (void)connectToGateway;

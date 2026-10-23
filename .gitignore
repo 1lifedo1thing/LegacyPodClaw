@@ -20,3 +20,7 @@ DerivedData/
 /tmp/
 
 __pycache__/
+
+# local agent state; never commit
+.claude/worktrees/
+.claude/settings.local.json

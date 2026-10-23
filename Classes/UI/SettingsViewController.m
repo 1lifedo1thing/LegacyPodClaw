@@ -7,8 +7,11 @@
  */
 
 #import "SettingsViewController.h"
+#import "ChannelSettingsViewController.h"
 #import "AppDelegate.h"
 #import "SecretStore.h"
+#import "GatewayToken.h"
+#import "ProviderRegistry.h"
 #import <sys/stat.h>
 #import <notify.h>
 
@@ -18,15 +21,28 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
     SettingsSectionGateway = 0,
     SettingsSectionAuth,
     SettingsSectionAgent,
+    SettingsSectionChannels,
     SettingsSectionServer,
     SettingsSectionActions,
     SettingsSectionAbout,
     SettingsSectionCount
 };
 
-@interface OCSettingsViewController () {
+enum {
+    kTagUseTLS = 1000,
+    kTagSelfSigned = 1001,
+    kTagServer = 2000,
+    kTagChannelTools = 3000,
+    kTagAutoStart = 3001,
+    kTagTokenAlert = 500,
+    kTagTokenConfirm = 501,
+    kTagResetConfirm = 502,
+    kTagInput = 100,
+};
+
+@interface OCSettingsViewController () <UIActionSheetDelegate> {
     NSMutableDictionary *_prefs;
-    NSInteger _editingTag;
+    NSString *_editingKey;
 }
 @end
 
@@ -41,8 +57,13 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
         initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                              target:self
                              action:@selector(_done)] autorelease];
+}
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    /* a channel screen may have written the plist since this one last read it */
     [self _loadPrefs];
+    [self.tableView reloadData];
 }
 
 - (void)_done {
@@ -56,23 +77,36 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
 }
 
 - (void)_savePrefs {
+    /* clawpodd migrates plist secrets at any time, so keep the file's current secret entries, not our stale copy */
+    NSDictionary *disk = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
+    for (NSString *key in [CPSecretStore allSecretKeys]) {
+        id onDisk = [disk objectForKey:key];
+        if (onDisk) [_prefs setObject:onDisk forKey:key];
+        else [_prefs removeObjectForKey:key];
+    }
     /* the plist holds the api base url, so keep it private to mobile */
     if ([_prefs writeToFile:PREFS_PATH atomically:YES]) chmod([PREFS_PATH fileSystemRepresentation], 0600);
+    /* the app's own prefsChanged listener reloads the settings; a direct call here would reconnect twice */
     notify_post("pro.matthesketh.legacypodclaw/prefsChanged");
-    [[AppDelegate shared] loadConnectionSettings];
 }
 
 - (NSString *)_prefString:(NSString *)key {
     if ([CPSecretStore isSecretKey:key]) return [CPSecretStore secretForKey:key] ?: @"";
-    return [_prefs objectForKey:key] ?: @"";
+    return [[_prefs objectForKey:key] description] ?: @"";
 }
 
 - (BOOL)_prefBool:(NSString *)key {
     return [[_prefs objectForKey:key] boolValue];
 }
 
+- (OCProviderInfo *)_provider {
+    return [OCProviderInfo providerWithId:[_prefs objectForKey:@"modelProvider"]]
+        ?: [OCProviderInfo providerWithId:[OCProviderInfo defaultProviderId]];
+}
+
 - (void)dealloc {
     [_prefs release];
+    [_editingKey release];
     [super dealloc];
 }
 
@@ -84,12 +118,13 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     switch (section) {
-        case SettingsSectionGateway: return @"Gateway Connection";
-        case SettingsSectionAuth:    return @"Authentication";
-        case SettingsSectionAgent:   return @"Local Agent";
-        case SettingsSectionServer:  return @"Gateway Server";
-        case SettingsSectionActions: return @"";
-        case SettingsSectionAbout:   return @"About";
+        case SettingsSectionGateway:  return @"Gateway Connection";
+        case SettingsSectionAuth:     return @"Authentication";
+        case SettingsSectionAgent:    return @"Model Provider";
+        case SettingsSectionChannels: return @"Chat Channels";
+        case SettingsSectionServer:   return @"Gateway Server";
+        case SettingsSectionActions:  return @"";
+        case SettingsSectionAbout:    return @"About";
         default: return nil;
     }
 }
@@ -99,23 +134,40 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
         case SettingsSectionGateway:
             return @"Connect to a LegacyPodClaw gateway on your network.";
         case SettingsSectionAgent:
-            return @"Used when no gateway is connected.";
+            return @"Used when no gateway is connected, by chat channels and by the gateway server.";
+        case SettingsSectionChannels:
+            return @"Chat messages are untrusted. With tools off, chat replies cannot touch the device. With tools on, "
+                   @"every tool call from a chat must be approved on this device. Channels run only while the app runs.";
         case SettingsSectionServer:
-            return @"Run the full LegacyPodClaw gateway on this device. Other devices can connect to it.";
+            return @"Run the full LegacyPodClaw gateway on this device. Other devices on your network "
+                   @"must send the access token as \"Authorization: Bearer <token>\".";
         default: return nil;
     }
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     switch (section) {
-        case SettingsSectionGateway: return 4;
-        case SettingsSectionAuth:    return 2;
-        case SettingsSectionAgent:   return 2;
-        case SettingsSectionServer:  return 3;
-        case SettingsSectionActions: return 2;
-        case SettingsSectionAbout:   return 2;
+        case SettingsSectionGateway:  return 4;
+        case SettingsSectionAuth:     return 2;
+        case SettingsSectionAgent:    return 4;
+        case SettingsSectionChannels: return (NSInteger)[[OCChannelSettingsViewController channelIds] count] + 2;
+        case SettingsSectionServer:   return 4;
+        case SettingsSectionActions:  return 2;
+        case SettingsSectionAbout:    return 2;
         default: return 0;
     }
+}
+
+- (UITableViewCell *)_switchCell:(NSString *)title on:(BOOL)on tag:(NSInteger)tag {
+    UITableViewCell *cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil] autorelease];
+    cell.textLabel.text = title;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    UISwitch *sw = [[[UISwitch alloc] init] autorelease];
+    sw.on = on;
+    sw.tag = tag;
+    [sw addTarget:self action:@selector(_switchChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = sw;
+    return cell;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView
@@ -124,6 +176,7 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
         initWithStyle:UITableViewCellStyleValue1
       reuseIdentifier:nil] autorelease];
     cell.selectionStyle = UITableViewCellSelectionStyleBlue;
+    NSString *const dots = @"•••••";
 
     switch (indexPath.section) {
         case SettingsSectionGateway: {
@@ -140,72 +193,70 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
                         ? [self _prefString:@"gatewayPort"] : @"18789";
                     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
                     break;
-                case 2: {
-                    cell.textLabel.text = @"Use TLS";
-                    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-                    UISwitch *sw = [[[UISwitch alloc] init] autorelease];
-                    sw.on = [self _prefBool:@"useTLS"];
-                    sw.tag = 1000;
-                    [sw addTarget:self action:@selector(_switchChanged:) forControlEvents:UIControlEventValueChanged];
-                    cell.accessoryView = sw;
-                    break;
-                }
-                case 3: {
-                    cell.textLabel.text = @"Self-Signed Certs";
-                    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-                    UISwitch *sw = [[[UISwitch alloc] init] autorelease];
-                    sw.on = [self _prefBool:@"allowSelfSigned"];
-                    sw.tag = 1001;
-                    [sw addTarget:self action:@selector(_switchChanged:) forControlEvents:UIControlEventValueChanged];
-                    cell.accessoryView = sw;
-                    break;
-                }
+                case 2: return [self _switchCell:@"Use TLS" on:[self _prefBool:@"useTLS"] tag:kTagUseTLS];
+                case 3: return [self _switchCell:@"Self-Signed Certs" on:[self _prefBool:@"allowSelfSigned"] tag:kTagSelfSigned];
             }
             break;
         }
         case SettingsSectionAuth: {
-            switch (indexPath.row) {
-                case 0:
-                    cell.textLabel.text = @"Token";
-                    cell.detailTextLabel.text = [[self _prefString:@"authToken"] length] > 0 ? @"\u2022\u2022\u2022\u2022\u2022" : @"Not set";
-                    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-                    break;
-                case 1:
-                    cell.textLabel.text = @"Password";
-                    cell.detailTextLabel.text = [[self _prefString:@"authPassword"] length] > 0 ? @"\u2022\u2022\u2022\u2022\u2022" : @"Not set";
-                    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-                    break;
-            }
+            NSString *key = indexPath.row == 0 ? @"authToken" : @"authPassword";
+            cell.textLabel.text = indexPath.row == 0 ? @"Token" : @"Password";
+            cell.detailTextLabel.text = [[self _prefString:key] length] > 0 ? dots : @"Not set";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             break;
         }
         case SettingsSectionAgent: {
+            OCProviderInfo *provider = [self _provider];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             switch (indexPath.row) {
                 case 0:
-                    cell.textLabel.text = @"API Key";
-                    cell.detailTextLabel.text = [[self _prefString:@"apiKey"] length] > 0 ? @"\u2022\u2022\u2022\u2022\u2022" : @"Not set";
-                    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                    cell.textLabel.text = @"Provider";
+                    cell.detailTextLabel.text = provider.displayName;
                     break;
                 case 1:
                     cell.textLabel.text = @"Model";
                     cell.detailTextLabel.text = [[self _prefString:@"modelId"] length] > 0
-                        ? [self _prefString:@"modelId"] : @"claude-sonnet-4-20250514";
-                    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                        ? [self _prefString:@"modelId"] : (provider.defaultModel ?: @"Not set");
                     break;
+                case 2:
+                    cell.textLabel.text = @"API Key";
+                    if (!provider.secretKey) {
+                        cell.detailTextLabel.text = @"Not needed";
+                        cell.accessoryType = UITableViewCellAccessoryNone;
+                        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+                    } else {
+                        cell.detailTextLabel.text = [[self _prefString:provider.secretKey] length] > 0 ? dots
+                            : (provider.requiresKey ? @"Not set" : @"Optional");
+                    }
+                    break;
+                case 3:
+                    cell.textLabel.text = @"Base URL";
+                    cell.detailTextLabel.text = [[self _prefString:provider.baseURLPrefKey] length] > 0
+                        ? [self _prefString:provider.baseURLPrefKey] : (provider.defaultBaseURL ? @"Default" : @"Not set");
+                    break;
+            }
+            break;
+        }
+        case SettingsSectionChannels: {
+            NSArray *ids = [OCChannelSettingsViewController channelIds];
+            if ((NSUInteger)indexPath.row < [ids count]) {
+                NSString *cid = [ids objectAtIndex:indexPath.row];
+                cell.textLabel.text = [OCChannelSettingsViewController titleForChannel:cid];
+                BOOL enabled = [self _prefBool:[cid stringByAppendingString:@"Enabled"]];
+                BOOL connected = [[[AppDelegate shared].channelManager channelForId:cid] isConnected];
+                cell.detailTextLabel.text = !enabled ? @"Off" : connected ? @"Connected" : @"On";
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            } else if ((NSUInteger)indexPath.row == [ids count]) {
+                return [self _switchCell:@"Tools in Chats" on:[self _prefBool:@"channelToolsEnabled"] tag:kTagChannelTools];
+            } else {
+                return [self _switchCell:@"Start on Boot" on:[self _prefBool:@"autoStartOnBoot"] tag:kTagAutoStart];
             }
             break;
         }
         case SettingsSectionServer: {
             switch (indexPath.row) {
-                case 0: {
-                    cell.textLabel.text = @"Gateway Server";
-                    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-                    UISwitch *sw = [[[UISwitch alloc] init] autorelease];
-                    sw.on = [AppDelegate shared].gatewayServer.isRunning;
-                    sw.tag = 2000;
-                    [sw addTarget:self action:@selector(_switchChanged:) forControlEvents:UIControlEventValueChanged];
-                    cell.accessoryView = sw;
-                    break;
-                }
+                case 0:
+                    return [self _switchCell:@"Gateway Server" on:[AppDelegate shared].gatewayServer.isRunning tag:kTagServer];
                 case 1:
                     cell.textLabel.text = @"Server Port";
                     cell.detailTextLabel.text = [[self _prefString:@"serverPort"] length] > 0
@@ -225,6 +276,14 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
                         cell.detailTextLabel.text = @"Stopped";
                         cell.detailTextLabel.textColor = [UIColor grayColor];
                     }
+                    break;
+                }
+                case 3: {
+                    NSString *token = [OCGatewayToken currentToken];
+                    cell.textLabel.text = @"Access Token";
+                    cell.detailTextLabel.text = token
+                        ? [[token substringToIndex:8] stringByAppendingString:@"…"] : @"Unavailable";
+                    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
                     break;
                 }
             }
@@ -251,7 +310,7 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
             cell.accessoryType = UITableViewCellAccessoryNone;
             if (indexPath.row == 0) {
                 cell.textLabel.text = @"Version";
-                cell.detailTextLabel.text = @"0.1.0";
+                cell.detailTextLabel.text = @"0.3.0";
             } else {
                 cell.textLabel.text = @"Device";
                 cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ iOS %@",
@@ -272,25 +331,43 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
 
     if (indexPath.section == SettingsSectionGateway) {
         if (indexPath.row == 0) {
-            [self _showInput:@"Gateway Host" key:@"gatewayHost" placeholder:@"192.168.1.x" secure:NO tag:100];
+            [self _showInput:@"Gateway Host" key:@"gatewayHost" placeholder:@"192.168.1.x" secure:NO];
         } else if (indexPath.row == 1) {
-            [self _showInput:@"Gateway Port" key:@"gatewayPort" placeholder:@"18789" secure:NO tag:101];
+            [self _showInput:@"Gateway Port" key:@"gatewayPort" placeholder:@"18789" secure:NO];
         }
     } else if (indexPath.section == SettingsSectionAuth) {
         if (indexPath.row == 0) {
-            [self _showInput:@"Auth Token" key:@"authToken" placeholder:@"Token" secure:YES tag:200];
+            [self _showInput:@"Auth Token" key:@"authToken" placeholder:@"Token" secure:YES];
         } else {
-            [self _showInput:@"Password" key:@"authPassword" placeholder:@"Password" secure:YES tag:201];
+            [self _showInput:@"Password" key:@"authPassword" placeholder:@"Password" secure:YES];
         }
     } else if (indexPath.section == SettingsSectionAgent) {
+        OCProviderInfo *provider = [self _provider];
         if (indexPath.row == 0) {
-            [self _showInput:@"API Key" key:@"apiKey" placeholder:@"sk-ant-..." secure:YES tag:300];
-        } else {
-            [self _showInput:@"Model ID" key:@"modelId" placeholder:@"claude-sonnet-4-20250514" secure:NO tag:301];
+            [self _showProviderPicker];
+        } else if (indexPath.row == 1) {
+            [self _showInput:@"Model ID" key:@"modelId" placeholder:provider.modelHint ?: @"" secure:NO];
+        } else if (indexPath.row == 2 && provider.secretKey) {
+            [self _showInput:[NSString stringWithFormat:@"%@ API Key", provider.displayName]
+                         key:provider.secretKey placeholder:@"API key" secure:YES];
+        } else if (indexPath.row == 3) {
+            [self _showInput:[NSString stringWithFormat:@"%@ Base URL", provider.displayName] key:provider.baseURLPrefKey
+                 placeholder:provider.defaultBaseURL ?: @"http://192.168.1.x:11434/v1" secure:NO];
         }
+    } else if (indexPath.section == SettingsSectionChannels) {
+        NSArray *ids = [OCChannelSettingsViewController channelIds];
+        if ((NSUInteger)indexPath.row >= [ids count]) return;
+        NSString *cid = [ids objectAtIndex:indexPath.row];
+        OCChannelSettingsViewController *vc = [[[OCChannelSettingsViewController alloc]
+            initWithTitle:[OCChannelSettingsViewController titleForChannel:cid]
+                   fields:[OCChannelSettingsViewController fieldsForChannel:cid]
+                   footer:[OCChannelSettingsViewController footerForChannel:cid]] autorelease];
+        [self.navigationController pushViewController:vc animated:YES];
     } else if (indexPath.section == SettingsSectionServer) {
         if (indexPath.row == 1) {
-            [self _showInput:@"Server Port" key:@"serverPort" placeholder:@"18789" secure:NO tag:400];
+            [self _showInput:@"Server Port" key:@"serverPort" placeholder:@"18789" secure:NO];
+        } else if (indexPath.row == 3) {
+            [self _showAccessToken];
         }
     } else if (indexPath.section == SettingsSectionActions) {
         if (indexPath.row == 0) {
@@ -302,18 +379,52 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
             }
             [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
         } else {
-            [_prefs removeAllObjects];
-            [self _savePrefs];
-            [tableView reloadData];
+            UIAlertView *confirm = [[UIAlertView alloc] initWithTitle:@"Reset All Settings"
+                message:@"This deletes every setting, API key and token." delegate:self
+                cancelButtonTitle:@"Cancel" otherButtonTitles:@"Reset", nil];
+            confirm.tag = kTagResetConfirm;
+            [confirm show];
+            [confirm release];
         }
     }
 }
 
+- (void)_resetAllSettings {
+    [_prefs removeAllObjects];
+    /* secrets live in the keychain, so clearing the plist alone would keep them */
+    for (NSString *key in [CPSecretStore allSecretKeys]) [CPSecretStore setSecret:nil forKey:key];
+    [self _savePrefs];
+    [self.tableView reloadData];
+}
+
+#pragma mark - Provider Picker
+
+- (void)_showProviderPicker {
+    UIActionSheet *sheet = [[UIActionSheet alloc] initWithTitle:@"Model Provider" delegate:self
+                                              cancelButtonTitle:nil destructiveButtonTitle:nil otherButtonTitles:nil];
+    for (OCProviderInfo *p in [OCProviderInfo allProviders]) [sheet addButtonWithTitle:p.displayName];
+    sheet.cancelButtonIndex = [sheet addButtonWithTitle:@"Cancel"];
+    [sheet showInView:self.view];
+    [sheet release];
+}
+
+- (void)actionSheet:(UIActionSheet *)sheet clickedButtonAtIndex:(NSInteger)buttonIndex {
+    NSArray *all = [OCProviderInfo allProviders];
+    if (buttonIndex < 0 || (NSUInteger)buttonIndex >= [all count]) return;
+    OCProviderInfo *chosen = [all objectAtIndex:buttonIndex];
+    if ([chosen.providerId isEqualToString:[self _provider].providerId]) return;
+    [_prefs setObject:chosen.providerId forKey:@"modelProvider"];
+    /* a model id belongs to one provider, so it does not carry over */
+    [_prefs removeObjectForKey:@"modelId"];
+    [self _savePrefs];
+    [self.tableView reloadData];
+}
+
 #pragma mark - Input Dialog
 
-- (void)_showInput:(NSString *)title key:(NSString *)key placeholder:(NSString *)placeholder
-            secure:(BOOL)secure tag:(NSInteger)tag {
-    _editingTag = tag;
+- (void)_showInput:(NSString *)title key:(NSString *)key placeholder:(NSString *)placeholder secure:(BOOL)secure {
+    [_editingKey release];
+    _editingKey = [key copy];
 
     UIAlertView *alert = [[UIAlertView alloc] initWithTitle:title
                                                     message:nil
@@ -321,7 +432,7 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
                                           cancelButtonTitle:@"Cancel"
                                           otherButtonTitles:@"Save", nil];
     alert.alertViewStyle = secure ? UIAlertViewStyleSecureTextInput : UIAlertViewStylePlainTextInput;
-    alert.tag = tag;
+    alert.tag = kTagInput;
 
     UITextField *tf = [alert textFieldAtIndex:0];
     tf.placeholder = placeholder;
@@ -337,77 +448,96 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
     [alert release];
 }
 
-- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
-    if (buttonIndex != 1) return;
+- (void)_showAccessToken {
+    NSString *token = [OCGatewayToken currentToken];
+    UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Gateway Access Token"
+        message:token ?: @"The token file could not be created."
+        delegate:self cancelButtonTitle:@"Close" otherButtonTitles:@"Copy", @"Regenerate", nil];
+    alert.tag = kTagTokenAlert;
+    [alert show];
+    [alert release];
+}
 
-    NSString *value = [[alertView textFieldAtIndex:0] text];
-    NSString *key = nil;
-
-    switch (alertView.tag) {
-        case 100: key = @"gatewayHost"; break;
-        case 101: key = @"gatewayPort"; break;
-        case 200: key = @"authToken"; break;
-        case 201: key = @"authPassword"; break;
-        case 300: key = @"apiKey"; break;
-        case 301: key = @"modelId"; break;
-        case 400: key = @"serverPort"; break;
+- (void)_handleTokenAlert:(UIAlertView *)alertView button:(NSInteger)buttonIndex {
+    if (alertView.tag == kTagTokenAlert && buttonIndex == 1) {
+        NSString *token = [OCGatewayToken currentToken];
+        if (token) [[UIPasteboard generalPasteboard] setString:token];
+    } else if (alertView.tag == kTagTokenAlert && buttonIndex == 2) {
+        UIAlertView *confirm = [[UIAlertView alloc] initWithTitle:@"Regenerate Token?"
+            message:@"Every client must be updated with the new token. Connected clients are disconnected."
+            delegate:self cancelButtonTitle:@"Cancel" otherButtonTitles:@"Regenerate", nil];
+        confirm.tag = kTagTokenConfirm;
+        [confirm show];
+        [confirm release];
+    } else if (alertView.tag == kTagTokenConfirm && buttonIndex == 1) {
+        OCGatewayServer *server = [AppDelegate shared].gatewayServer;
+        NSString *token = server.isRunning ? [server regenerateAccessToken] : [OCGatewayToken regenerateToken];
+        [self.tableView reloadData];
+        if (token) [self _showAccessToken];
     }
+}
 
-    if (key && value && [CPSecretStore isSecretKey:key]) {
+- (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
+    if (alertView.tag == kTagResetConfirm) {
+        if (buttonIndex == 1) [self _resetAllSettings];
+        return;
+    }
+    if (alertView.tag == kTagTokenAlert || alertView.tag == kTagTokenConfirm) {
+        [self _handleTokenAlert:alertView button:buttonIndex];
+        return;
+    }
+    if (buttonIndex != 1 || alertView.tag != kTagInput || !_editingKey) return;
+
+    NSString *key = _editingKey;
+    NSString *value = [[[alertView textFieldAtIndex:0] text]
+                       stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    if ([CPSecretStore isSecretKey:key]) {
         if (![CPSecretStore setSecret:value forKey:key]) {
             UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Not Saved"
                 message:@"clawpodd did not store the value. Unlock the device and check that clawpodd runs."
                 delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
             [alert show]; [alert release];
         }
-        [self _savePrefs];
-        [self.tableView reloadData];
-    } else if (key && value) {
-        if ([value length] > 0) {
-            [_prefs setObject:value forKey:key];
-        } else {
-            [_prefs removeObjectForKey:key];
-        }
-        [self _savePrefs];
-        [self.tableView reloadData];
+    } else if ([value length] > 0) {
+        [_prefs setObject:value forKey:key];
+    } else {
+        [_prefs removeObjectForKey:key];
     }
+    [self _savePrefs];
+    [self.tableView reloadData];
 }
 
 #pragma mark - Switches
 
 - (void)_switchChanged:(UISwitch *)sw {
     switch (sw.tag) {
-        case 1000:
+        case kTagUseTLS:
             [_prefs setObject:@(sw.on) forKey:@"useTLS"];
             break;
-        case 1001:
+        case kTagSelfSigned:
             [_prefs setObject:@(sw.on) forKey:@"allowSelfSigned"];
             break;
-        case 2000: {
+        case kTagChannelTools:
+            [_prefs setObject:@(sw.on) forKey:@"channelToolsEnabled"];
+            break;
+        case kTagAutoStart:
+            [_prefs setObject:@(sw.on) forKey:@"autoStartOnBoot"];
+            break;
+        case kTagServer: {
             if (sw.on) {
-                /* Start gateway server */
-                OCGatewayConfig *cfg = [[[OCGatewayConfig alloc] init] autorelease];
-                NSString *portStr = [self _prefString:@"serverPort"];
-                cfg.port = [portStr length] > 0 ? [portStr intValue] : 18789;
-                cfg.authMode = @"none"; /* Can be configured later */
-                cfg.defaultApiKey = [self _prefString:@"apiKey"];
-                cfg.defaultModelId = [self _prefString:@"modelId"];
-
-                OCGatewayServer *server = [[OCGatewayServer alloc] initWithConfig:cfg];
-                [AppDelegate shared].gatewayServer = server;
                 NSError *err = nil;
-                if (![server start:&err]) {
+                if (![[AppDelegate shared] startGatewayServer:&err]) {
                     UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Server Error"
                         message:[err localizedDescription] delegate:nil
                         cancelButtonTitle:@"OK" otherButtonTitles:nil];
                     [alert show]; [alert release];
                     sw.on = NO;
                 }
-                [server release];
             } else {
-                [[AppDelegate shared].gatewayServer stop];
-                [AppDelegate shared].gatewayServer = nil;
+                [[AppDelegate shared] stopGatewayServer];
             }
+            [_prefs setObject:@(sw.on) forKey:@"gatewayServerEnabled"];
             [self.tableView reloadData];
             break;
         }

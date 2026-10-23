@@ -8,13 +8,14 @@
  * - Typing indicator while waiting for response
  * - Keyboard dismiss on tap outside
  * - Error popups when no connection/API key
+ * - Without a gateway, replies come from the local agent and the provider chosen in Settings
  */
 
 #import "ChatViewController.h"
 #import "ChatCell.h"
 #import "AppDelegate.h"
 #import "ToolDispatcher.h"
-#import "TLSClient.h"
+#import "ProviderRegistry.h"
 
 static const CGFloat kInputBarHeight = 44.0f;
 static const CGFloat kMaxInputHeight = 100.0f;
@@ -41,19 +42,12 @@ static const CGFloat kTypingCellHeight = 40.0f;
     /* Status */
     UILabel *_statusLabel;
 
-    /* Direct API mode */
-    NSURLConnection *_directConn;
+    /* Direct agent mode */
     NSMutableString *_directStreamBuf;
-    NSMutableString *_directSSEBuf;
-    NSMutableArray *_directHistory;   /* conversation history for API */
     NSMutableArray *_directMessages;  /* local message objects for display */
-
-    /* Tool execution state */
-    NSString *_pendingToolName;
-    NSString *_pendingToolId;
-    NSMutableString *_pendingToolInput;
-    int _pendingStopReason;  /* 0 = none, 1 = tool_use */
-    NSUInteger _toolStatusStart; /* position in _directStreamBuf where tool status starts */
+    OCMessage *_streamingMessage;
+    NSString *_streamingSessionKey;
+    NSString *_agentSessionKey;       /* session whose turns the agent context holds */
 }
 @end
 
@@ -77,16 +71,16 @@ static const CGFloat kTypingCellHeight = 40.0f;
     _tapDismiss.cancelsTouchesInView = NO;
     [_tableView addGestureRecognizer:_tapDismiss];
 
-    /* Batch stream updates at 10fps */
-    _streamUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
-                                                          target:self
-                                                        selector:@selector(_flushStreamUpdates)
-                                                        userInfo:nil
-                                                         repeats:YES];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+
+    /* a repeating timer retains its target, so run it only while the view is on screen */
+    if (!_streamUpdateTimer) {
+        _streamUpdateTimer = [NSTimer scheduledTimerWithTimeInterval:0.1 target:self
+            selector:@selector(_flushStreamUpdates) userInfo:nil repeats:YES];
+    }
 
     OCSessionManager *mgr = [AppDelegate shared].sessionManager;
 
@@ -101,31 +95,24 @@ static const CGFloat kTypingCellHeight = 40.0f;
         [mgr switchToSession:first.sessionKey];
     }
 
-    /* Rebuild API conversation history from persisted messages (lazy, last 10) */
-    if (mgr.activeSession && [mgr.activeSession.messages count] > 0 &&
-        (!_directHistory || [_directHistory count] == 0)) {
-        if (!_directHistory) _directHistory = [[NSMutableArray alloc] initWithCapacity:20];
-        NSArray *msgs = mgr.activeSession.messages;
-        NSUInteger start = [msgs count] > 10 ? [msgs count] - 10 : 0;
-        for (NSUInteger i = start; i < [msgs count]; i++) {
-            OCMessage *m = [msgs objectAtIndex:i];
-            if (m.role == OCMessageRoleUser && m.content) {
-                [_directHistory addObject:@{@"role": @"user", @"content": m.content}];
-            } else if (m.role == OCMessageRoleAssistant && m.content) {
-                [_directHistory addObject:@{@"role": @"assistant", @"content": m.content}];
-            }
-        }
-    }
-
     [_tableView reloadData];
     [self _scrollToBottomAnimated:NO];
 }
 
-- (void)dealloc {
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self _flushStreamUpdates];
     [_streamUpdateTimer invalidate];
+    _streamUpdateTimer = nil;
+}
+
+- (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_tableView release]; [_inputBar release]; [_inputTextView release];
     [_sendButton release]; [_tapDismiss release]; [_statusLabel release];
+    if ([AppDelegate shared].localAgent.delegate == (id)self) [AppDelegate shared].localAgent.delegate = nil;
+    [_directStreamBuf release]; [_directMessages release];
+    [_streamingMessage release]; [_streamingSessionKey release]; [_agentSessionKey release];
     [super dealloc];
 }
 
@@ -214,12 +201,14 @@ static const CGFloat kTypingCellHeight = 40.0f;
     OCGatewayConnectionState gwState = app.gateway.connectionState;
 
     if (gwState != OCGatewayStateConnected) {
-        /* Check if local agent has API key */
-        if (!app.localAgent.modelConfig.apiKey || [app.localAgent.modelConfig.apiKey length] == 0) {
+        /* Check that the selected provider has the key it needs */
+        OCModelConfig *cfg = app.localAgent.modelConfig;
+        OCProviderInfo *provider = [OCProviderInfo providerWithId:cfg.providerId];
+        if (provider.requiresKey && [cfg.apiKey length] == 0) {
             UIAlertView *alert = [[UIAlertView alloc]
                 initWithTitle:@"Not Connected"
-                      message:@"No gateway connection and no API key configured.\n\n"
-                               "Go to Settings \u2192 LegacyPodClaw to set up a gateway or API key."
+                      message:[NSString stringWithFormat:@"No gateway connection and no %@ API key configured.\n\n"
+                               "Open Settings in this app to set up a gateway or API key.", provider.displayName]
                      delegate:nil
             cancelButtonTitle:@"OK"
             otherButtonTitles:nil];
@@ -228,6 +217,9 @@ static const CGFloat kTypingCellHeight = 40.0f;
             return;
         }
     }
+
+    /* the local agent runs one turn at a time; keep the text so the user can send it after the reply */
+    if (gwState != OCGatewayStateConnected && app.localAgent.isProcessing) return;
 
     _inputTextView.text = @"";
     _sendButton.enabled = NO;
@@ -256,362 +248,113 @@ static const CGFloat kTypingCellHeight = 40.0f;
     }
 }
 
-#pragma mark - Direct API Mode
+#pragma mark - Direct Agent Mode
 
-/* Update the streaming assistant bubble with the current buffer text */
-- (void)_updateAssistantBubbleWithText:(NSString *)text {
-    NSArray *msgs = [self _currentMessages];
-    if ([msgs count] > 0) {
-        OCMessage *last = [msgs lastObject];
-        if (last.role == OCMessageRoleAssistant && last.state == OCMessageStateStreaming) {
-            [last.streamBuffer setString:text ?: @""];
-            _needsStreamUpdate = YES;
-        }
+/* rebuilds the agent context from the stored session, so a switched session keeps its own memory */
+- (void)_loadAgentHistory:(OCChatSession *)session excludingLast:(NSUInteger)skip {
+    OCAgent *agent = [AppDelegate shared].localAgent;
+    NSArray *msgs = session.messages;
+    NSUInteger end = [msgs count] > skip ? [msgs count] - skip : 0;
+    NSUInteger start = end > 10 ? end - 10 : 0;
+    NSMutableArray *history = [NSMutableArray arrayWithCapacity:end - start];
+    for (NSUInteger i = start; i < end; i++) {
+        OCMessage *m = [msgs objectAtIndex:i];
+        if (![m.content length] || m.state == OCMessageStateError) continue;
+        if (m.role == OCMessageRoleUser)
+            [history addObject:[OCAgentMessage messageWithRole:OCAgentRoleUser content:m.content]];
+        else if (m.role == OCMessageRoleAssistant)
+            [history addObject:[OCAgentMessage messageWithRole:OCAgentRoleAssistant content:m.content]];
     }
+    [agent loadHistory:history];
+    [_agentSessionKey release];
+    _agentSessionKey = [session.sessionKey copy];
 }
 
 - (void)_sendDirectAPI:(NSString *)text {
     AppDelegate *app = [AppDelegate shared];
+    OCAgent *agent = app.localAgent;
+    if (agent.isProcessing) return;
 
-    if (!_directHistory) _directHistory = [[NSMutableArray alloc] initWithCapacity:20];
-    if (!_directStreamBuf) _directStreamBuf = [[NSMutableString alloc] init];
-    if (!_directSSEBuf) _directSSEBuf = [[NSMutableString alloc] init];
-
-    /* Ensure we have an active session */
     OCSessionManager *mgr = app.sessionManager;
-    if (!mgr.activeSession) {
-        [mgr createSession:@"Untitled"];
-        if (!mgr.activeSession) {
-            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
-        }
-    }
-
+    if (!mgr.activeSession) [mgr createSession:@"Untitled"];
+    OCChatSession *session = mgr.activeSession;
     if (!_directMessages) _directMessages = [[NSMutableArray alloc] initWithCapacity:32];
 
-    /* Show user message in UI immediately */
     OCMessage *userMsg = [OCMessage userMessage:text];
-    if (mgr.activeSession) {
-        [(NSMutableArray *)mgr.activeSession.messages addObject:userMsg];
-        /* Persist user message to DB */
-        [mgr persistMessage:userMsg sessionKey:mgr.activeSession.sessionKey];
+    if (session) {
+        [(NSMutableArray *)session.messages addObject:userMsg];
+        [mgr persistMessage:userMsg sessionKey:session.sessionKey];
     }
     [_directMessages addObject:userMsg];
-    [_tableView reloadData];
-    [self _scrollToBottomAnimated:YES];
 
-    /* Create streaming placeholder */
     OCMessage *assistantMsg = [[[OCMessage alloc] init] autorelease];
     assistantMsg.role = OCMessageRoleAssistant;
     assistantMsg.state = OCMessageStateStreaming;
-    if (mgr.activeSession) {
-        [(NSMutableArray *)mgr.activeSession.messages addObject:assistantMsg];
-    }
+    if (session) [(NSMutableArray *)session.messages addObject:assistantMsg];
     [_directMessages addObject:assistantMsg];
     [_tableView reloadData];
     [self _scrollToBottomAnimated:YES];
 
-    /* Build conversation history */
-    [_directHistory addObject:@{@"role": @"user", @"content": text}];
-    while ([_directHistory count] > 10) [_directHistory removeObjectAtIndex:0];
+    [_streamingMessage release];
+    _streamingMessage = [assistantMsg retain];
+    [_streamingSessionKey release];
+    _streamingSessionKey = [session.sessionKey copy];
+    [_directStreamBuf release];
+    _directStreamBuf = [[NSMutableString alloc] init];
 
-    /* API call via CPTLSClient (wolfSSL TLS 1.2) */
-    NSString *apiKey = app.localAgent.modelConfig.apiKey;
-    NSString *model = app.localAgent.modelConfig.modelId ?: @"claude-sonnet-4-20250514";
-
-    NSDictionary *headers = @{
-        @"Content-Type": @"application/json",
-        @"anthropic-version": @"2023-06-01",
-        @"x-api-key": apiKey,
-        @"Accept": @"text/event-stream"
-    };
-
-    /* Build tool definitions from registered tools (ensure unique names) */
-    NSMutableArray *toolDefs = [NSMutableArray array];
-    NSMutableSet *seenNames = [NSMutableSet set];
-    for (OCToolDefinition *tool in [app.localAgent registeredTools]) {
-        if (!tool.name || [seenNames containsObject:tool.name]) continue;
-        [seenNames addObject:tool.name];
-        [toolDefs addObject:@{
-            @"name": tool.name,
-            @"description": tool.toolDescription ?: @"",
-            @"input_schema": tool.inputSchema ?: @{@"type": @"object", @"properties": @{}}
-        }];
+    if (session && ![_agentSessionKey isEqualToString:session.sessionKey]) {
+        [self _loadAgentHistory:session excludingLast:2];
     }
-
-    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithCapacity:8];
-    [body setObject:model forKey:@"model"];
-    [body setObject:@(4096) forKey:@"max_tokens"];
-    [body setObject:@YES forKey:@"stream"];
-    [body setObject:app.localAgent.systemPrompt ?: @"You are a helpful AI assistant." forKey:@"system"];
-    [body setObject:_directHistory forKey:@"messages"];
-    if ([toolDefs count] > 0) {
-        [body setObject:toolDefs forKey:@"tools"];
-    }
-    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-
-    [_directStreamBuf setString:@""];
-    [_directSSEBuf setString:@""];
-    _toolStatusStart = 0;
-    _pendingStopReason = 0;
-
-    [self _executeAPIRequest:bodyData headers:headers];
+    agent.delegate = self;
+    agent.toolCaller = OCToolCallerChat;
+    agent.toolsEnabled = YES;
+    [agent processMessage:text];
 }
 
-/* Execute an API request and handle the full agent loop (text + tool calls) */
-- (void)_executeAPIRequest:(NSData *)bodyData headers:(NSDictionary *)headers {
-    AppDelegate *app = [AppDelegate shared];
-
-    [CPTLSClient streamRequest:@"https://api.anthropic.com/v1/messages"
-                        method:@"POST"
-                       headers:headers
-                          body:bodyData
-                       onChunk:^(NSData *chunk) {
-        NSString *chunkStr = [[NSString alloc] initWithData:chunk encoding:NSUTF8StringEncoding];
-        if (!chunkStr) { [chunkStr release]; return; }
-        [_directSSEBuf appendString:chunkStr];
-        [chunkStr release];
-
-        NSArray *lines = [_directSSEBuf componentsSeparatedByString:@"\n"];
-        [_directSSEBuf setString:[lines lastObject] ?: @""];
-
-        for (NSUInteger i = 0; i < [lines count] - 1; i++) {
-            NSString *line = [lines objectAtIndex:i];
-            NSString *trimmed = [line stringByTrimmingCharactersInSet:
-                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            /* Skip chunked encoding hex lines */
-            if ([trimmed length] > 0 && [trimmed length] <= 8) {
-                BOOL isHex = YES;
-                for (NSUInteger ci = 0; ci < [trimmed length]; ci++) {
-                    unichar ch = [trimmed characterAtIndex:ci];
-                    if (!((ch>='0'&&ch<='9')||(ch>='a'&&ch<='f')||(ch>='A'&&ch<='F')))
-                        { isHex = NO; break; }
-                }
-                if (isHex) continue;
-            }
-            if (![line hasPrefix:@"data: "]) continue;
-            NSString *json = [line substringFromIndex:6];
-            if ([json isEqualToString:@"[DONE]"]) continue;
-
-            NSDictionary *evt = [NSJSONSerialization JSONObjectWithData:
-                [json dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
-            if (!evt) continue;
-
-            NSString *evtType = [evt objectForKey:@"type"];
-
-            /* Text streaming */
-            if ([evtType isEqualToString:@"content_block_delta"]) {
-                NSDictionary *delta = [evt objectForKey:@"delta"];
-                NSString *deltaType = [delta objectForKey:@"type"];
-
-                if ([deltaType isEqualToString:@"text_delta"]) {
-                    NSString *text = [delta objectForKey:@"text"];
-                    if (text) {
-                        [_directStreamBuf appendString:text];
-                        NSArray *msgs = [self _currentMessages];
-                        if ([msgs count] > 0) {
-                            OCMessage *last = [msgs lastObject];
-                            if (last.role == OCMessageRoleAssistant && last.state == OCMessageStateStreaming) {
-                                [last appendDelta:text];
-                                _needsStreamUpdate = YES;
-                            }
-                        }
-                    }
-                }
-                /* Tool input JSON delta — accumulate for tool execution */
-                else if ([deltaType isEqualToString:@"input_json_delta"]) {
-                    NSString *partial = [delta objectForKey:@"partial_json"];
-                    if (partial) {
-                        if (!_pendingToolInput) _pendingToolInput = [[NSMutableString alloc] init];
-                        [_pendingToolInput appendString:partial];
-                    }
-                }
-            }
-            /* Tool use started */
-            else if ([evtType isEqualToString:@"content_block_start"]) {
-                NSDictionary *block = [evt objectForKey:@"content_block"];
-                if ([[block objectForKey:@"type"] isEqualToString:@"tool_use"]) {
-                    [_pendingToolName release];
-                    _pendingToolName = [[block objectForKey:@"name"] copy];
-                    [_pendingToolId release];
-                    _pendingToolId = [[block objectForKey:@"id"] copy];
-                    [_pendingToolInput release];
-                    _pendingToolInput = [[NSMutableString alloc] init];
-
-                    /* Show tool status — always replace from the same position */
-                    if (_toolStatusStart == 0) _toolStatusStart = [_directStreamBuf length];
-                    /* Replace everything from tool status start onwards */
-                    if (_toolStatusStart <= [_directStreamBuf length]) {
-                        [_directStreamBuf replaceCharactersInRange:
-                            NSMakeRange(_toolStatusStart, [_directStreamBuf length] - _toolStatusStart)
-                            withString:[NSString stringWithFormat:@"\n> %@...", _pendingToolName]];
-                    }
-                    [self _updateAssistantBubbleWithText:_directStreamBuf];
-                }
-            }
-            /* Message complete — check if we need to execute tools */
-            else if ([evtType isEqualToString:@"message_delta"]) {
-                NSDictionary *msgDelta = [evt objectForKey:@"delta"];
-                NSString *stopReason = [msgDelta objectForKey:@"stop_reason"];
-                if ([stopReason isEqualToString:@"tool_use"]) {
-                    _pendingStopReason = 1; /* Flag for tool execution */
-                }
-            }
-        }
-    }
-                    completion:^(NSData *data, NSInteger statusCode, NSError *error) {
-        if (error) {
-            _isWaitingForResponse = NO;
-            NSArray *msgs = [self _currentMessages];
-            if ([msgs count] > 0) {
-                OCMessage *last = [msgs lastObject];
-                if (last.role == OCMessageRoleAssistant) {
-                    [last.streamBuffer setString:[NSString stringWithFormat:@"Error: %@",
-                        [error localizedDescription]]];
-                    [last finalizeStream];
-                    last.state = OCMessageStateError;
-                }
-            }
-            [_tableView reloadData];
-            return;
-        }
-
-        /* If model stopped for tool_use, execute the tool and continue */
-        if (_pendingStopReason == 1 && _pendingToolName) {
-            [self _executeToolAndContinue:headers];
-            return;
-        }
-
-        /* Normal completion — finalize */
-        _isWaitingForResponse = NO;
-        NSArray *msgs = [self _currentMessages];
-        if ([msgs count] > 0) {
-            OCMessage *last = [msgs lastObject];
-            if (last.role == OCMessageRoleAssistant) {
-                [last finalizeStream];
-            }
-        }
-
-        if ([_directStreamBuf length] > 0) {
-            [_directHistory addObject:@{@"role": @"assistant",
-                @"content": [[_directStreamBuf copy] autorelease]}];
-        }
-
-        /* Persist completed assistant message to DB */
-        OCSessionManager *mgr = [AppDelegate shared].sessionManager;
-        if (mgr.activeSession) {
-            NSArray *msgs = [self _currentMessages];
-            if ([msgs count] > 0) {
-                OCMessage *last = [msgs lastObject];
-                if (last.role == OCMessageRoleAssistant && last.content) {
-                    [mgr persistMessage:last sessionKey:mgr.activeSession.sessionKey];
-                }
-            }
-        }
-
-        [_tableView reloadData];
-        [self _scrollToBottomAnimated:YES];
-    }];
+- (void)_showStreamText:(NSString *)text {
+    [_streamingMessage.streamBuffer setString:text ?: @""];
+    _needsStreamUpdate = YES;
 }
 
-/* Execute a pending tool call and send the result back to continue the conversation */
-- (void)_executeToolAndContinue:(NSDictionary *)headers {
-    AppDelegate *app = [AppDelegate shared];
+- (void)_finishStreamingMessage:(BOOL)failed {
+    OCMessage *msg = [[_streamingMessage retain] autorelease];
+    NSString *sessionKey = [[_streamingSessionKey retain] autorelease];
+    [_streamingMessage release]; _streamingMessage = nil;
+    [_streamingSessionKey release]; _streamingSessionKey = nil;
+    _isWaitingForResponse = NO;
+    [msg finalizeStream];
+    if (failed) msg.state = OCMessageStateError;
+    if (!failed && sessionKey && [msg.content length])
+        [[AppDelegate shared].sessionManager persistMessage:msg sessionKey:sessionKey];
+    [_tableView reloadData];
+    [self _scrollToBottomAnimated:YES];
+}
 
-    /* Parse tool input */
-    NSDictionary *toolInput = nil;
-    if (_pendingToolInput && [_pendingToolInput length] > 0) {
-        toolInput = [NSJSONSerialization JSONObjectWithData:
-            [_pendingToolInput dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
-    }
+#pragma mark - OCAgentDelegate
 
-    /* Find and execute the tool */
-    NSString *toolName = [[_pendingToolName copy] autorelease];
-    NSString *toolId = [[_pendingToolId copy] autorelease];
-
-    OCToolDefinition *tool = [OCToolDispatcher toolNamed:toolName inTools:[app.localAgent registeredTools]];
-
-    if (!tool || !tool.handler) {
-        /* Tool not found — send error back */
-        [self _sendToolResult:toolId result:@"Tool not found" headers:headers];
+- (void)agent:(OCAgent *)agent didProduceText:(NSString *)text isFinal:(BOOL)isFinal {
+    if (!_streamingMessage) return;
+    if (!isFinal) {
+        [_directStreamBuf appendString:text ?: @""];
+        [self _showStreamText:_directStreamBuf];
         return;
     }
-
-    /* Update status to "Running..." — replace from tool status start */
-    if (_toolStatusStart <= [_directStreamBuf length]) {
-        [_directStreamBuf replaceCharactersInRange:
-            NSMakeRange(_toolStatusStart, [_directStreamBuf length] - _toolStatusStart)
-            withString:[NSString stringWithFormat:@"\n> Running %@...", toolName]];
-        [self _updateAssistantBubbleWithText:_directStreamBuf];
-    }
-
-    /* Execute tool */
-    [[OCToolDispatcher shared] runTool:tool input:toolInput caller:OCToolCallerChat
-                            completion:^(NSString *result, NSError *err) {
-        NSString *resultStr = err ? [NSString stringWithFormat:@"Error: %@", [err localizedDescription]] : result;
-
-        /* Clear tool status — the model's next response will replace it */
-        if (_toolStatusStart <= [_directStreamBuf length]) {
-            [_directStreamBuf replaceCharactersInRange:
-                NSMakeRange(_toolStatusStart, [_directStreamBuf length] - _toolStatusStart)
-                withString:@""];
-        }
-        /* Reset tool status position so next tool or text starts fresh */
-        _toolStatusStart = 0;
-
-        [self _sendToolResult:toolId result:resultStr headers:headers];
-    }];
+    [self _showStreamText:[text length] ? text : _directStreamBuf];
+    [self _finishStreamingMessage:NO];
 }
 
-/* Send tool result back to API and continue the conversation */
-- (void)_sendToolResult:(NSString *)toolId result:(NSString *)result headers:(NSDictionary *)headers {
-    AppDelegate *app = [AppDelegate shared];
-
-    /* Add assistant tool_use + user tool_result to history */
-    [_directHistory addObject:@{@"role": @"assistant", @"content": @[
-        @{@"type": @"tool_use", @"id": toolId ?: @"", @"name": _pendingToolName ?: @"",
-          @"input": [NSJSONSerialization JSONObjectWithData:
-              [_pendingToolInput ?: @"{}" dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil] ?: @{}}
-    ]}];
-    [_directHistory addObject:@{@"role": @"user", @"content": @[
-        @{@"type": @"tool_result", @"tool_use_id": toolId ?: @"", @"content": result ?: @""}
-    ]}];
-
-    /* Reset tool state */
-    _pendingStopReason = 0;
-    [_pendingToolName release]; _pendingToolName = nil;
-    [_pendingToolId release]; _pendingToolId = nil;
-    [_pendingToolInput release]; _pendingToolInput = nil;
-    [_directSSEBuf setString:@""];
-
-    /* Build next request body */
-    NSString *model = app.localAgent.modelConfig.modelId ?: @"claude-sonnet-4-20250514";
-    NSMutableArray *toolDefs = [NSMutableArray array];
-    NSMutableSet *seenNames = [NSMutableSet set];
-    for (OCToolDefinition *t in [app.localAgent registeredTools]) {
-        if (!t.name || [seenNames containsObject:t.name]) continue;
-        [seenNames addObject:t.name];
-        [toolDefs addObject:@{
-            @"name": t.name,
-            @"description": t.toolDescription ?: @"",
-            @"input_schema": t.inputSchema ?: @{@"type": @"object", @"properties": @{}}
-        }];
-    }
-
-    NSMutableDictionary *body = [NSMutableDictionary dictionary];
-    [body setObject:model forKey:@"model"];
-    [body setObject:@(4096) forKey:@"max_tokens"];
-    [body setObject:@YES forKey:@"stream"];
-    [body setObject:app.localAgent.systemPrompt ?: @"" forKey:@"system"];
-    [body setObject:_directHistory forKey:@"messages"];
-    if ([toolDefs count] > 0) [body setObject:toolDefs forKey:@"tools"];
-
-    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-
-    /* Continue the agent loop */
-    [self _executeAPIRequest:bodyData headers:headers];
+- (void)agent:(OCAgent *)agent didFailWithError:(NSError *)error {
+    if (!_streamingMessage) return;
+    [self _showStreamText:[NSString stringWithFormat:@"Error: %@", [error localizedDescription]]];
+    [self _finishStreamingMessage:YES];
+    /* the failed turn left an unanswered question in the context, so start clean next time */
+    [_agentSessionKey release]; _agentSessionKey = nil;
 }
 
-/* NSURLConnection delegates removed — using CPTLSClient for direct API */
+- (void)agent:(OCAgent *)agent willInvokeTool:(NSString *)toolName withParams:(NSDictionary *)params {
+    [_directStreamBuf appendFormat:@"\n> %@...\n", toolName];
+    [self _showStreamText:_directStreamBuf];
+}
 
 #pragma mark - Public Updates
 

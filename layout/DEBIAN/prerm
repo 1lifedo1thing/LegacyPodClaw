@@ -1,14 +1,7 @@
-#!/bin/bash
-# LegacyPodClaw pre-removal script
+#!/bin/sh
+# LegacyPodClaw pre-removal script; $1 is remove, upgrade, deconfigure or failed-upgrade
 
-# Stop daemon
+# stop the daemon so dpkg can replace or remove its binary
 launchctl unload /Library/LaunchDaemons/pro.matthesketh.legacypodclaw.daemon.plist 2>/dev/null
-
-# Clean up clawpod group
-sed -i '' '/^clawpod:/d' /etc/group 2>/dev/null
-
-# Respring to unload tweak from SpringBoard memory
-# Without this, hooks persist until reboot even after dylib removal
-killall -9 SpringBoard 2>/dev/null
 
 exit 0

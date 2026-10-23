@@ -48,11 +48,20 @@ LegacyPodClaw hooks into iOS via MobileSubstrate to replace system surfaces with
 
 ## Features
 
-**AI Providers** — Anthropic, OpenAI, Google/Gemini, Ollama, Groq, Together AI, OpenRouter, Mistral, Deepseek, or any custom endpoint. Automatic failover between providers.
+**AI Providers** — Pick the provider, model, API key and base URL in the app's Settings. The in-app chat, the chat channels and the gateway server use that choice. Two adapters do the work, both with streaming and tool calling:
+
+- Anthropic Messages API (default model `claude-sonnet-5-5`; also `claude-opus-5-5`, `claude-haiku-5-5`, `claude-fable-5-1`)
+- OpenAI-compatible chat completions, shared by OpenAI, Google Gemini (through its OpenAI-compatible endpoint), Groq, Together AI, OpenRouter, Mistral, DeepSeek, Ollama and any custom endpoint
+
+Each provider keeps its own API key in the keychain. HTTPS goes through wolfSSL; plain HTTP is allowed for a local server such as Ollama. There is no automatic failover between providers. The home-button overlay and the Notification Center widget always use Anthropic.
 
 **Tool System** — Shell execution, file operations, web search, Notes & Reminders (direct database writes), Messages.app integration, system controls (brightness, volume, app launching), YouTube music search & download, device diagnostics, persistent memory.
 
-**Gateway Server** — Run the device as an OpenClaw-compatible API server (HTTP + WebSocket on port 18789) with channel support for Telegram, Discord, IRC, Slack, and webhooks.
+**Chat Channels** — Talk to the assistant from Telegram (long polling), Discord (gateway websocket), Slack (Socket Mode, so no public URL is needed), IRC (plain or TLS) and a generic webhook. Set each one up in the app: Settings, Chat Channels. Every chat gets its own conversation, and the reply goes back to the same chat. Each channel has an allow list of user or chat IDs; messages from anyone else are ignored, and an empty list ignores everyone. Chat text is untrusted, so channel conversations get no tools unless you turn on "Tools in Chats", and even then the device asks you to approve every tool call. In Discord and Slack channels, and IRC rooms, the bot answers only when it is mentioned or addressed by nick. Channels run while the app runs; iOS 6 suspends a backgrounded app after about ten minutes.
+
+**Gateway Server** — Run the device as an OpenClaw-compatible API server (HTTP + WebSocket on port 18789). The webhook channel receives messages through `POST /webhook/incoming` on this server, with the gateway access token as a bearer token, and posts replies to your callback URL. With "Start on Boot" on, the app starts the server and channels when the tweak signals that SpringBoard has booted, if the app is running.
+
+**Plugins** — The app loads `.bundle` plugins from `/Library/LegacyPodClaw/Plugins`. It refuses the directory or a bundle unless root owns it and neither group nor others can write to it, so only a package installed as root can add code. A plugin's principal class conforms to `OCPlugin` (see `Frameworks/Plugin/PluginSDK.h`). `providedTools` returns `OCToolDefinition` objects or dictionaries with `name`, `description`, `inputSchema` and a `handler` block; the app always asks before a plugin tool runs, and a plugin tool cannot replace a built-in one. `providedChannels` returns objects that conform to `OCChannel`; set their allow list with the `<channelId>AllowedIds` preference.
 
 **System Daemon** — `clawpodd` provides root-level access via CPDistributedMessagingCenter IPC: battery/hardware info via IOKit, syslog monitoring, sandbox reading.
 
@@ -160,7 +169,7 @@ See [LegacyPodClawMCP/README.md](LegacyPodClawMCP/README.md) for details.
 
 | Component | Description |
 |-----------|------------|
-| **LegacyPodClaw.app** | Main application — chat UI, agent loop, tool execution, 10 AI providers |
+| **LegacyPodClaw.app** | Main application — chat UI, agent loop, tool execution, model providers, chat channels, plugins |
 | **LegacyPodClawTweak** | MobileSubstrate tweak — home button, Spotlight, lock screen, NC, app switcher hooks |
 | **LegacyPodClawNC** | Notification Center widget (BBWeeAppController) |
 | **LegacyPodClawPrefs** | Settings.app preference bundle |
@@ -183,6 +192,13 @@ See [LegacyPodClawMCP/README.md](LegacyPodClawMCP/README.md) for details.
 - **Added iPhone 4S support** — hooks Siri activation (`SBAssistantController`) in addition to Voice Control
 - **Added iPad support** — UIDeviceFamily includes iPad, layout adapts to screen size
 - **Updated package identifier** to `pro.matthesketh.legacypodclaw`
+
+## Providers and Channels Removed or Limited
+
+- **Automatic provider failover** was removed. It never ran, and a silent switch to another provider would send your data somewhere you did not choose.
+- **Gemini** is supported only through Google's OpenAI-compatible endpoint, not the native `generateContent` API.
+- **Slack incoming webhooks and the Events API** were removed. Both need a public URL that a device on a home network does not have; Socket Mode replaces them.
+- **Telegram, Discord and Slack reactions, edits and deletes** were removed. Nothing used them.
 
 ## Credits
 

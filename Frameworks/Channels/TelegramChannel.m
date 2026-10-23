@@ -13,6 +13,7 @@ static const NSTimeInterval kMaxMessageAge = 600;
     NSString *_botToken;
     BOOL _running;
     BOOL _connected;
+    BOOL _quickPoll;
     long long _lastUpdateId;
     NSUInteger _pollGeneration;
     NSTimeInterval _backoff;
@@ -44,7 +45,10 @@ static const NSTimeInterval kMaxMessageAge = 600;
     if (_running || ![self isConfigured]) return;
     _running = YES;
     _backoff = 0;
+    /* a long poll can take 25 s to answer, so the first call returns at once to show the link works */
+    _quickPoll = YES;
     _pollGeneration++;
+    OCChannelStatusChanged(self);
     [self _poll];
 }
 
@@ -65,7 +69,7 @@ static const NSTimeInterval kMaxMessageAge = 600;
     if (!_running) return;
     NSUInteger gen = _pollGeneration;
     NSString *url = [NSString stringWithFormat:@"%@%@/getUpdates?timeout=%d&offset=%lld&allowed_updates=%%5B%%22message%%22%%5D",
-                     kTelegramAPI, _botToken, kPollTimeout, _lastUpdateId + 1];
+                     kTelegramAPI, _botToken, _quickPoll ? 0 : kPollTimeout, _lastUpdateId + 1];
     [CPTLSClient request:url method:@"GET" headers:nil body:nil
               completion:^(NSData *data, NSInteger status, NSError *error) {
         if (gen != _pollGeneration || !_running) return;
@@ -85,6 +89,7 @@ static const NSTimeInterval kMaxMessageAge = 600;
             return;
         }
         _connected = YES;
+        _quickPoll = NO;
         _backoff = 0;
         [self _setError:nil];
         NSArray *updates = [json objectForKey:@"result"];

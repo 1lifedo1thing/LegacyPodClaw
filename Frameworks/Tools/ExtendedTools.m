@@ -1,14 +1,29 @@
 /*
- * OCExtendedTools.m
- * LegacyPodClaw - Extended Tool Catalog Implementation
+ * ExtendedTools.m
+ * LegacyPodClaw - extended tool catalog
+ *
+ * Tools that change the device set requiresConfirmation, and OCToolDispatcher
+ * asks the user before each call.
  */
 
 #import "ExtendedTools.h"
+#import "ToolInputCheck.h"
+#import "Guardrails.h"
+#import "HTTPFetch.h"
 #import <UIKit/UIKit.h>
 #import <sys/sysctl.h>
 #import <sys/mount.h>
+#import <sys/types.h>
+#import <sys/wait.h>
+#import <sys/resource.h>
+#import <sys/time.h>
+#import <signal.h>
+#import <unistd.h>
 #import <ifaddrs.h>
 #import <arpa/inet.h>
+#import <poll.h>
+#import <spawn.h>
+#import <fcntl.h>
 
 static OCStore *_memoryStore = nil;
 
@@ -32,43 +47,103 @@ static OCStore *_memoryStore = nil;
 
 #pragma mark - Bash
 
+#define BASH_OUTPUT_MAX 16384
+
+/* every call is confirmed by the user through OCToolDispatcher, so there is no denylist */
+static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
+    const char *ccmd = [cmd UTF8String];
+    if (!ccmd) return @{@"output": @"command is not valid utf-8", @"exit": @(-1)};
+
+    int out[2];
+    if (pipe(out) != 0) return @{@"output": @"pipe failed", @"exit": @(-1)};
+    fcntl(out[0], F_SETFD, FD_CLOEXEC);
+    fcntl(out[1], F_SETFD, FD_CLOEXEC);
+
+    /* cloexec-default closes every app descriptor (sockets, sqlite) in the child */
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&actions, out[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, out[1], STDERR_FILENO);
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attr, 0);
+
+    /* limits are set by the shell, because posix_spawn cannot set rlimits */
+    char limits[96];
+    snprintf(limits, sizeof(limits), "ulimit -t %d 2>/dev/null; ulimit -f 32768 2>/dev/null; eval \"$1\"", (int)timeout);
+    char *args[] = {(char *)"sh", (char *)"-c", limits, (char *)"sh", (char *)ccmd, NULL};
+    char *env[] = {(char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin", (char *)"HOME=/var/mobile",
+                   (char *)"USER=mobile", (char *)"TERM=dumb", NULL};
+    pid_t pid = -1;
+    int spawnErr = posix_spawn(&pid, "/bin/sh", &actions, &attr, args, env);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
+    close(out[1]);
+    if (spawnErr != 0) {
+        close(out[0]);
+        return @{@"output": [NSString stringWithFormat:@"could not start /bin/sh: %s", strerror(spawnErr)], @"exit": @(-1)};
+    }
+
+    NSMutableData *data = [NSMutableData data];
+    BOOL truncated = NO, timedOut = NO;
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+    char buf[4096];
+    for (;;) {
+        int remainingMs = (int)([deadline timeIntervalSinceNow] * 1000);
+        if (remainingMs <= 0) { timedOut = YES; break; }
+        struct pollfd pfd = {out[0], POLLIN, 0};
+        int ready = poll(&pfd, 1, remainingMs);
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) { timedOut = (ready == 0); break; }
+        ssize_t n = read(out[0], buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        NSUInteger room = BASH_OUTPUT_MAX - [data length];
+        if ((NSUInteger)n > room) truncated = YES;
+        if (room > 0) [data appendBytes:buf length:MIN((NSUInteger)n, room)];
+    }
+    close(out[0]);
+
+    /* the shell may close its output and keep running, so wait with the same deadline */
+    int status = 0;
+    pid_t done = 0;
+    while (!timedOut && (done = waitpid(pid, &status, WNOHANG)) == 0) {
+        if ([deadline timeIntervalSinceNow] <= 0) { timedOut = YES; break; }
+        usleep(50000);
+    }
+    if (timedOut || done < 0) {
+        kill(-pid, SIGTERM);
+        usleep(200000);
+        kill(-pid, SIGKILL);
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+
+    if (truncated) [data setLength:OCUtf8SafeLength([data bytes], [data length])];
+    NSString *output = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]
+        ?: [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
+    if (truncated) output = [output stringByAppendingString:@"\n[output truncated]"];
+    if (timedOut) output = [output stringByAppendingFormat:@"\n[timed out after %.0f s]", timeout];
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1);
+    return @{@"output": output, @"exit": @(code)};
+}
+
 + (OCToolDefinition *)bashTool {
     OCToolDefinition *t = [[[OCToolDefinition alloc] init] autorelease];
     t.name = @"bash";
-    t.toolDescription = @"Execute a shell command and return output. Use for system tasks.";
+    t.toolDescription = @"Run a shell command as the mobile user with /bin/sh and return its output. The user approves every call.";
     t.inputSchema = @{@"type": @"object",
-        @"properties": @{@"command": @{@"type": @"string"}},
+        @"properties": @{@"command": @{@"type": @"string", @"description": @"Command for /bin/sh -c"}},
         @"required": @[@"command"]};
     t.requiresConfirmation = YES;
-    t.timeout = 30.0;
+    t.timeout = 35.0;
     t.handler = ^(NSDictionary *params, OCToolResultBlock cb) {
         NSString *cmd = [params objectForKey:@"command"];
-        if (!cmd) { cb(@"Missing command", nil); return; }
-
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            /* Use popen() since NSTask isn't available on iOS */
-            NSString *fullCmd = [NSString stringWithFormat:@"%@ 2>&1", cmd];
-            FILE *fp = popen([fullCmd UTF8String], "r");
-            if (!fp) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    cb(@"Failed to execute command", nil);
-                });
-                return;
-            }
-
-            NSMutableString *output = [NSMutableString stringWithCapacity:1024];
-            char buf[256];
-            while (fgets(buf, sizeof(buf), fp) != NULL) {
-                [output appendFormat:@"%s", buf];
-                /* Cap at 16KB */
-                if ([output length] > 16384) break;
-            }
-            int status = pclose(fp);
-
-            NSMutableString *result = [NSMutableString stringWithFormat:@"Exit code: %d\n", WEXITSTATUS(status)];
-            if ([output length] > 0) [result appendFormat:@"Output:\n%@", output];
-
-            dispatch_async(dispatch_get_main_queue(), ^{ cb(result, nil); });
+            NSDictionary *r = RunShellCommand(cmd, 30.0);
+            NSString *text = [NSString stringWithFormat:@"Exit code: %@\n%@", [r objectForKey:@"exit"], [r objectForKey:@"output"]];
+            dispatch_async(dispatch_get_main_queue(), ^{ cb(text, nil); });
         });
     };
     return t;
@@ -81,10 +156,16 @@ static OCStore *_memoryStore = nil;
     t.inputSchema = @{@"type": @"object", @"properties": @{}};
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
-        size_t size;
-        sysctl(mib, 4, NULL, &size, NULL, 0);
-        struct kinfo_proc *procs = malloc(size);
-        sysctl(mib, 4, procs, &size, NULL, 0);
+        size_t size = 0;
+        struct kinfo_proc *procs = NULL;
+        /* the table can grow between the size query and the read */
+        if (sysctl(mib, 4, NULL, &size, NULL, 0) == 0) {
+            size += size / 4;
+            procs = malloc(size);
+            if (procs && sysctl(mib, 4, procs, &size, NULL, 0) != 0) { free(procs); procs = NULL; }
+        }
+        if (!procs) { cb(nil, [NSError errorWithDomain:@"OCExtendedTools" code:1
+            userInfo:@{NSLocalizedDescriptionKey: @"cannot read the process table"}]); return; }
         int count = (int)(size / sizeof(struct kinfo_proc));
 
         NSMutableArray *list = [NSMutableArray arrayWithCapacity:count];
@@ -111,6 +192,13 @@ static OCStore *_memoryStore = nil;
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSString *path = [p objectForKey:@"path"];
         NSString *content = [p objectForKey:@"content"];
+        NSUInteger bytes = [content lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        if (bytes > [[OCGuardrails shared] maxFileWriteSize]) {
+            cb(nil, [NSError errorWithDomain:@"OCTools" code:1 userInfo:@{NSLocalizedDescriptionKey:
+                [NSString stringWithFormat:@"content is %lu bytes; the limit is %lu", (unsigned long)bytes,
+                 (unsigned long)[[OCGuardrails shared] maxFileWriteSize]]}]);
+            return;
+        }
         NSError *e = nil;
         [content writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&e];
         cb(e ? [e localizedDescription] : [NSString stringWithFormat:@"Written %lu bytes to %@",
@@ -198,13 +286,12 @@ static OCStore *_memoryStore = nil;
         @"required": @[@"query"]};
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSString *q = [p objectForKey:@"query"];
-        NSString *encoded = [q stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        /* escape & = + too, or the query could add its own parameters */
+        NSString *encoded = [(NSString *)CFURLCreateStringByAddingPercentEscapes(NULL, (CFStringRef)q, NULL,
+            CFSTR("!*'();:@&=+$,/?#[]"), kCFStringEncodingUTF8) autorelease];
         NSString *url = [NSString stringWithFormat:
             @"https://html.duckduckgo.com/html/?q=%@", encoded];
-        NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:url]
-            cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:15];
-        [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-            completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
+        CPFetch(url, @"GET", nil, nil, 15, ^(NSData *d, NSInteger status, NSError *e) {
             if (e) { cb(nil, e); return; }
             NSString *html = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] autorelease];
             /* Extract result snippets - simple parsing */
@@ -232,7 +319,7 @@ static OCStore *_memoryStore = nil;
             }
             cb([results count] > 0 ? [results componentsJoinedByString:@"\n\n"]
                                     : @"No results found", nil);
-        }];
+        });
     };
     return t;
 }

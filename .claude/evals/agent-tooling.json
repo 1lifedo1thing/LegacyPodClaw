@@ -1,0 +1,80 @@
+{
+  "plan": ".claude/plans/agent-tooling.md",
+  "content_evals": [
+    {
+      "id": "ios6-review-traps",
+      "skill": "ios6-review",
+      "setup": "untracked zz_evaltmp/t.m and zz_evaltmp/t.xm with: weak property, HTTPS NSURLConnection, secret written to prefs, direct tool.handler call, containsString:, and 'if (x) { %orig; return; }'",
+      "prompt": "/ios6-review",
+      "expected": "verdict fail; findings with rules mrr, tls, secret, dispatch, api, logos"
+    },
+    {
+      "id": "ios6-review-clean",
+      "skill": "ios6-review",
+      "setup": "diff that changes only a comment in a .m file",
+      "prompt": "/ios6-review",
+      "expected": "verdict pass; zero findings"
+    },
+    {
+      "id": "mac-build-branch",
+      "skill": "mac-build",
+      "setup": "clean checkout of the branch",
+      "prompt": "/mac-build agent-tooling",
+      "expected": "status ok and a deb path, or the list of error: and Undefined lines"
+    }
+  ],
+  "trigger_evals": {
+    "mac-build": {
+      "should_trigger": [
+        {"q": "does this branch still build?", "split": "train"},
+        {"q": "make package and give me the deb", "split": "train"},
+        {"q": "I get Undefined symbols for _OBJC_CLASS_$_CPTLSClient, fix it", "split": "train"},
+        {"q": "compile the tweak after my Tweak.xm change", "split": "train"},
+        {"q": "check the daemon links on the mac mini", "split": "train"},
+        {"q": "build FINALPACKAGE for the release candidate", "split": "train"},
+        {"q": "verify the Makefile change works", "split": "val"},
+        {"q": "run theos on the new prefs bundle", "split": "val"},
+        {"q": "is the arm7 build green", "split": "val"},
+        {"q": "build it so I can test on the ipod", "split": "val"}
+      ],
+      "should_not_trigger": [
+        {"q": "deploy the docs site to fleet", "split": "train"},
+        {"q": "install the deb on my ipod over ssh", "split": "train"},
+        {"q": "set up github actions ci for this repo", "split": "train"},
+        {"q": "check whether this code uses iOS 7 APIs", "split": "train"},
+        {"q": "restart the pi's music proxy", "split": "train"},
+        {"q": "rebuild wolfssl from source", "split": "train"},
+        {"q": "write release notes for 0.3.1", "split": "val"},
+        {"q": "explain how the Makefile picks the SDK", "split": "val"},
+        {"q": "list the files on the mac desktop", "split": "val"},
+        {"q": "review this PR for style", "split": "val"}
+      ]
+    },
+    "ios6-review": {
+      "should_trigger": [
+        {"q": "will this run on iOS 6?", "split": "train"},
+        {"q": "check my diff for iOS 7+ APIs before I commit", "split": "train"},
+        {"q": "it builds but crashes with unrecognized selector on the ipod", "split": "train"},
+        {"q": "did I leak anything in the new channel class? we are MRR", "split": "train"},
+        {"q": "is my Tweak.xm hook safe for Logos", "split": "train"},
+        {"q": "I added a discord token setting, is that stored right", "split": "train"},
+        {"q": "pre-PR compatibility check for the gateway branch", "split": "val"},
+        {"q": "scan the whole tree for iOS 6 problems", "split": "val"},
+        {"q": "does the new provider use the right TLS path", "split": "val"},
+        {"q": "check that the new tool goes through the dispatcher", "split": "val"}
+      ],
+      "should_not_trigger": [
+        {"q": "review this python MCP server change", "split": "train"},
+        {"q": "do a security review of the docs site nginx config", "split": "train"},
+        {"q": "build the deb", "split": "train"},
+        {"q": "rename this method across the project", "split": "train"},
+        {"q": "write the PR description", "split": "train"},
+        {"q": "harden the docker compose file", "split": "train"},
+        {"q": "summarise what changed on this branch", "split": "val"},
+        {"q": "add a new setting to the prefs bundle", "split": "val"},
+        {"q": "review this SwiftUI view", "split": "val"},
+        {"q": "fix the typo in the README", "split": "val"}
+      ]
+    }
+  }
+}

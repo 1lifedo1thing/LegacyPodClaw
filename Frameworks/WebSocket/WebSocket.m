@@ -14,7 +14,7 @@
 #import "WebSocket.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
-#import <libkern/OSAtomic.h>
+/* Note: Using __sync builtins instead of deprecated OSAtomic for forward compatibility */
 
 NSString *const OCWSErrorDomain = @"OCWebSocketError";
 const NSInteger OCWSErrorHandshakeFailed  = 1001;
@@ -95,9 +95,16 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
     payloadLength = 0;
     payloadRead = 0;
     memset(maskKey, 0, 4);
+    /* the parser owns the payload; a delivered message holds its own reference */
+    [payload release];
     payload = nil;
     headerBytesRead = 0;
     memset(headerBuffer, 0, 8);
+}
+
+- (void)dealloc {
+    [payload release];
+    [super dealloc];
 }
 
 @end
@@ -147,7 +154,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
 
 - (instancetype)initWithURL:(NSURL *)url protocols:(NSArray *)protocols {
     if ((self = [super init])) {
-        _url = url;
+        _url = [url retain];
         _requestedProtocols = [protocols copy];
         _readyState = OCWSReadyStateClosed;
         _maxFrameSize = kDefaultMaxFrameSize;
@@ -177,6 +184,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
     [_socketQueue release];
     [_delegateQueue release];
     [_lastPongReceived release];
+    [_expectedAcceptKey release];
     [super dealloc];
 }
 
@@ -186,7 +194,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
     dispatch_async(_socketQueue, ^{
         if (_readyState != OCWSReadyStateClosed) return;
         _readyState = OCWSReadyStateConnecting;
-        OSAtomicIncrement32(&sActiveConnections);
+        __sync_add_and_fetch(&sActiveConnections, 1);
         [self _connect];
     });
 }
@@ -362,6 +370,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
     uint8_t sha1[CC_SHA1_DIGEST_LENGTH];
     CC_SHA1([acceptData bytes], (CC_LONG)[acceptData length], sha1);
     NSData *sha1Data = [NSData dataWithBytes:sha1 length:CC_SHA1_DIGEST_LENGTH];
+    [_expectedAcceptKey release];
     _expectedAcceptKey = [OCBase64Encode(sha1Data) retain];
 
     /* Build HTTP request */
@@ -506,7 +515,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
         NSInteger bytesRead = [_inputStream read:buffer maxLength:_readBufferSize];
         if (bytesRead <= 0) break;
 
-        OSAtomicAdd64(bytesRead, &sTotalBytesBuffered);
+        __sync_add_and_fetch(&sTotalBytesBuffered, bytesRead);
 
         if (!_handshakeComplete) {
             [_handshakeBuffer appendBytes:buffer length:bytesRead];
@@ -576,6 +585,14 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
                 if (_parser->headerBytesRead >= 2) {
                     _parser->payloadLength = ((uint16_t)_parser->headerBuffer[0] << 8) |
                                               (uint16_t)_parser->headerBuffer[1];
+                    
+                    /* SECURITY: Validate frame size even for 16-bit lengths */
+                    if (_parser->payloadLength > _maxFrameSize) {
+                        [self _failWithCode:OCWSErrorPayloadTooLarge
+                                    message:@"Frame payload exceeds maximum size"];
+                        return;
+                    }
+                    
                     _parser->state = _parser->masked ? OCWSParserStateMask : OCWSParserStatePayload;
                     _parser->headerBytesRead = 0;
                     if (_parser->payloadLength == 0 && !_parser->masked) {
@@ -679,7 +696,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
     NSData *payload = _parser->payload;
     BOOL fin = _parser->fin;
 
-    OSAtomicAdd64(-(int64_t)[payload length], &sTotalBytesBuffered);
+    __sync_sub_and_fetch(&sTotalBytesBuffered, (int64_t)[payload length]);
 
     switch (opcode) {
         case OCWSOpcText:
@@ -856,7 +873,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
                                        maxLength:[_writeBuffer length]];
 
         if (written > 0) {
-            OSAtomicAdd64(-written, &sTotalBytesBuffered);
+            __sync_sub_and_fetch(&sTotalBytesBuffered, written);
             if ((NSUInteger)written < [_writeBuffer length]) {
                 /* Partial write - keep remainder */
                 NSData *remainder = [NSData dataWithBytes:[_writeBuffer bytes] + written
@@ -954,7 +971,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
     [_fragmentBuffer release]; _fragmentBuffer = nil;
     [_parser reset];
 
-    OSAtomicDecrement32(&sActiveConnections);
+    __sync_sub_and_fetch(&sActiveConnections, 1);
 }
 
 @end

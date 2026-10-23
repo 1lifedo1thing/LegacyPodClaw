@@ -6,6 +6,11 @@
 	<string>pro.matthesketh.legacypodclaw.daemon</string>
 	<key>Program</key>
 	<string>/usr/bin/clawpodd</string>
+	<key>MachServices</key>
+	<dict>
+		<key>pro.matthesketh.legacypodclaw.secrets</key>
+		<true/>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>

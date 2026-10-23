@@ -17,7 +17,11 @@
 #import <sys/socket.h>
 #import <netdb.h>
 #import <sqlite3.h>
-#import <wolfssl/ssl.h>
+#import "TLSClient.h"
+#import "SecretStore.h"
+#import "SharedFiles.h"
+#import <objc/message.h>
+
 
 /* Session persistence — write overlay conversations to the app's DB */
 #define APP_DB_PATH @"/var/mobile/Documents/openclaw.db"
@@ -100,9 +104,16 @@ static void _persistOverlayMessage(NSString *content, int role) {
     }
 
     /* Update session timestamp and message count */
-    sqlite3_exec(db, [[NSString stringWithFormat:
-        @"UPDATE sessions SET last_active_at = %f, total_messages = total_messages + 1 WHERE key = '%@'",
-        now, _overlaySessionKey] UTF8String], NULL, NULL, NULL);
+    /* SECURITY FIX: Use prepared statement with parameter binding instead of stringWithFormat */
+    sqlite3_stmt *updateStmt;
+    if (sqlite3_prepare_v2(db,
+        "UPDATE sessions SET last_active_at = ?, total_messages = total_messages + 1 WHERE key = ?",
+        -1, &updateStmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_double(updateStmt, 1, now);
+        sqlite3_bind_text(updateStmt, 2, [_overlaySessionKey UTF8String], -1, SQLITE_TRANSIENT);
+        sqlite3_step(updateStmt);
+        sqlite3_finalize(updateStmt);
+    }
 
     sqlite3_close(db);
 }
@@ -129,6 +140,21 @@ static void _persistOverlayMessage(NSString *content, int role) {
 @end
 
 #define PREFS_PATH @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
+
+/* the generation five claude models think by default and accept an effort level */
+static BOOL LPCModelAlwaysThinks(NSString *model) {
+    for (NSString *family in @[@"claude-opus-5", @"claude-sonnet-5", @"claude-haiku-5", @"claude-fable-5"])
+        if ([model hasPrefix:family]) return YES;
+    return NO;
+}
+
+/* the overlay talks to anthropic only, so another provider's model id would be rejected */
+static NSString *LPCAnthropicModel(NSDictionary *prefs) {
+    NSString *provider = [prefs objectForKey:@"modelProvider"];
+    NSString *model = [prefs objectForKey:@"modelId"];
+    if ((provider && ![provider isEqualToString:@"anthropic"]) || [model length] == 0) return @"claude-sonnet-5-5";
+    return model;
+}
 #define PANEL_HEIGHT 290.0f
 #define ANIM_DURATION 0.28f
 
@@ -145,7 +171,6 @@ static void _persistOverlayMessage(NSString *content, int role) {
     BOOL _isProcessing;
     NSMutableArray *_conversationHistory; /* Array of {role, content} dicts */
     NSMutableString *_streamBuf;
-    NSMutableString *_sseBuf;
     NSURLConnection *_conn;
 }
 @property (nonatomic, assign) BOOL isVisible;
@@ -159,7 +184,6 @@ static void _persistOverlayMessage(NSString *content, int role) {
     if ((self = [super initWithFrame:frame])) {
         self.userInteractionEnabled = YES;
         _streamBuf = [[NSMutableString alloc] init];
-        _sseBuf = [[NSMutableString alloc] init];
         _conversationHistory = [[NSMutableArray alloc] initWithCapacity:20];
         CGFloat w = frame.size.width;
         CGFloat h = frame.size.height;
@@ -284,7 +308,7 @@ static void _persistOverlayMessage(NSString *content, int role) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_dimView release]; [_panel release]; [_inputField release];
     [_responseArea release]; [_typingDots release]; [_closeBtn release];
-    [_streamBuf release]; [_sseBuf release]; [_conn release];
+    [_streamBuf release]; [_conn release];
     [super dealloc];
 }
 
@@ -382,16 +406,17 @@ static void _persistOverlayMessage(NSString *content, int role) {
 
     _isProcessing = YES;
     [_streamBuf setString:@""];
-    [_sseBuf setString:@""];
 
     /* Persist user message to app's DB */
     _ensureOverlaySession();
     _persistOverlayMessage(q, 0); /* 0 = OCMessageRoleUser */
 
-    /* Get API key from prefs */
+    /* Get API key from secure keychain (with plist fallback) */
+    NSString *apiKey = [CPSecretStore secretForKey:@"apiKey"];
+    
+    /* Get model from prefs */
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-    NSString *apiKey = [prefs objectForKey:@"apiKey"];
-    NSString *model = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514";
+    NSString *model = LPCAnthropicModel(prefs);
 
     if (!apiKey || [apiKey length] == 0) {
         [self _showResult:@"No API key set.\n\nGo to Settings \u2192 LegacyPodClaw."]; return;
@@ -403,8 +428,7 @@ static void _persistOverlayMessage(NSString *content, int role) {
     /* Trim history to last 10 messages to fit context window */
     while ([_conversationHistory count] > 10) [_conversationHistory removeObjectAtIndex:0];
 
-    /* Use wolfSSL TLS 1.2 directly (iOS 6 system TLS is broken) */
-    NSDictionary *body = @{
+    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithDictionary:@{
         @"model": model,
         @"max_tokens": @(1024),
         @"stream": @YES,
@@ -414,224 +438,75 @@ static void _persistOverlayMessage(NSString *content, int role) {
                     "system control), direct the user to the LegacyPodClaw app where all tools are available. "
                     "In this overlay you can answer questions, have conversations, and give advice.",
         @"messages": _conversationHistory
-    };
+    }];
+    /* current models always think and pay for it from max_tokens, so give room and ask for little thought */
+    if (LPCModelAlwaysThinks(model)) {
+        [body setObject:@(4096) forKey:@"max_tokens"];
+        [body setObject:@{@"effort": @"low"} forKey:@"output_config"];
+    }
     NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    NSDictionary *headers = @{
+        @"Content-Type": @"application/json",
+        @"Accept": @"text/event-stream",
+        @"anthropic-version": @"2023-06-01",
+        @"x-api-key": apiKey
+    };
 
-    NSString *httpReqStr = [NSString stringWithFormat:
-        @"POST /v1/messages HTTP/1.1\r\n"
-        @"Host: api.anthropic.com\r\n"
-        @"Content-Type: application/json\r\n"
-        @"anthropic-version: 2023-06-01\r\n"
-        @"x-api-key: %@\r\n"
-        @"Accept: text/event-stream\r\n"
-        @"Content-Length: %lu\r\n"
-        @"Connection: close\r\n"
-        @"\r\n", apiKey, (unsigned long)[bodyData length]];
-
-    NSData *httpReqData = [httpReqStr dataUsingEncoding:NSUTF8StringEncoding];
-
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _responseArea.text = @"Connecting via TLS 1.2...";
-            _responseArea.textColor = [UIColor colorWithWhite:0.6f alpha:1];
-        });
-
-        static BOOL _wolfInited = NO;
-        if (!_wolfInited) { wolfSSL_Init(); _wolfInited = YES; }
-
-        /* DNS resolve */
-        struct addrinfo hints, *res;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        if (getaddrinfo("api.anthropic.com", "443", &hints, &res) != 0) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self _showResult:@"DNS resolution failed"];
-            });
-            return;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _responseArea.text = @"DNS resolved, connecting...";
-        });
-
-        int sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-        int connectResult = connect(sock, res->ai_addr, res->ai_addrlen);
-        freeaddrinfo(res);
-
-        if (connectResult != 0) {
-            close(sock);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self _showResult:@"TCP connect failed"];
-            });
-            return;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _responseArea.text = @"TCP connected, TLS handshake...";
-        });
-
-        /* TLS */
-        WOLFSSL_CTX *ctx = wolfSSL_CTX_new(wolfTLSv1_2_client_method());
-        wolfSSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
-        WOLFSSL *ssl = wolfSSL_new(ctx);
-        wolfSSL_set_fd(ssl, sock);
-        wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, "api.anthropic.com", 18);
-
-        if (wolfSSL_connect(ssl) != SSL_SUCCESS) {
-            int err = wolfSSL_get_error(ssl, 0);
-            char errBuf[128];
-            wolfSSL_ERR_error_string(err, errBuf);
-            NSString *errStr = [NSString stringWithUTF8String:errBuf];
-            wolfSSL_free(ssl); wolfSSL_CTX_free(ctx); close(sock);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self _showResult:[NSString stringWithFormat:@"TLS failed: %@", errStr]];
-            });
-            return;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _responseArea.text = @"TLS 1.2 connected! Sending request...";
-        });
-
-        /* Send HTTP request */
-        wolfSSL_write(ssl, [httpReqData bytes], (int)[httpReqData length]);
-        wolfSSL_write(ssl, [bodyData bytes], (int)[bodyData length]);
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            _responseArea.text = @"Request sent, waiting for response...";
-        });
-
-        /* Read response — handle chunked transfer encoding */
-        char buf[4096];
-        BOOL headersDone = NO;
-        NSMutableData *headerBuf = [NSMutableData dataWithCapacity:2048];
-        NSMutableData *bodyBuf = [NSMutableData dataWithCapacity:8192];
-        int httpStatus = 0;
-
-        while (1) {
-            int n = wolfSSL_read(ssl, buf, sizeof(buf));
-            if (n <= 0) break;
-
-            if (!headersDone) {
-                [headerBuf appendBytes:buf length:n];
-                const uint8_t *bytes = (const uint8_t *)[headerBuf bytes];
-                NSUInteger len = [headerBuf length];
-                for (NSUInteger i = 0; i + 3 < len; i++) {
-                    if (bytes[i]=='\r' && bytes[i+1]=='\n' && bytes[i+2]=='\r' && bytes[i+3]=='\n') {
-                        headersDone = YES;
-
-                        /* Parse status code */
-                        NSString *headerStr = [[NSString alloc] initWithBytes:bytes
-                            length:i encoding:NSUTF8StringEncoding];
-                        if ([headerStr length] > 12) {
-                            httpStatus = [[headerStr substringWithRange:NSMakeRange(9, 3)] intValue];
-                        }
-                        [headerStr release];
-
-                        /* Remaining data after headers */
-                        if (i + 4 < len) {
-                            [bodyBuf appendBytes:bytes+i+4 length:len-i-4];
-                        }
-                        break;
-                    }
-                }
-            } else {
-                [bodyBuf appendBytes:buf length:n];
+    NSMutableData *pending = [NSMutableData data];
+    [CPTLSClient streamRequest:@"https://api.anthropic.com/v1/messages" method:@"POST"
+                       headers:headers body:bodyData
+        onChunk:^(NSData *chunk) {
+            [pending appendData:chunk];
+            const char *bytes = (const char *)[pending bytes];
+            NSUInteger len = [pending length], start = 0;
+            for (NSUInteger i = 0; i < len; i++) {
+                if (bytes[i] != '\n') continue;
+                NSString *line = [[NSString alloc] initWithBytes:bytes + start length:i - start
+                                                        encoding:NSUTF8StringEncoding];
+                if (line) [self _handleSSELine:line];
+                [line release];
+                start = i + 1;
             }
+            [pending replaceBytesInRange:NSMakeRange(0, start) withBytes:NULL length:0];
         }
-
-        /* Check for HTTP errors */
-        if (httpStatus != 200) {
-            NSString *bodyStr = [[NSString alloc] initWithData:bodyBuf encoding:NSUTF8StringEncoding];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self _showResult:[NSString stringWithFormat:@"HTTP %d: %@",
-                    httpStatus, bodyStr ?: @"Unknown error"]];
-            });
-            [bodyStr release];
-            wolfSSL_shutdown(ssl); wolfSSL_free(ssl); wolfSSL_CTX_free(ctx); close(sock);
-            return;
-        }
-
-        /* Decode chunked transfer encoding if present.
-           Strip hex chunk size lines: lines that are only hex digits + optional \r */
-        NSString *rawBody = [[NSString alloc] initWithData:bodyBuf encoding:NSUTF8StringEncoding];
-        if (rawBody) {
-            /* Remove chunk size lines (hex digits followed by \r) */
-            NSMutableString *cleanBody = [NSMutableString stringWithCapacity:[rawBody length]];
-            NSArray *rawLines = [rawBody componentsSeparatedByString:@"\n"];
-            for (NSString *line in rawLines) {
-                NSString *trimmed = [line stringByTrimmingCharactersInSet:
-                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                /* Skip lines that are only hex digits (chunk sizes) or empty */
-                if ([trimmed length] == 0) { [cleanBody appendString:@"\n"]; continue; }
-                BOOL isChunkSize = YES;
-                for (NSUInteger ci = 0; ci < [trimmed length]; ci++) {
-                    unichar ch = [trimmed characterAtIndex:ci];
-                    if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) {
-                        isChunkSize = NO; break;
-                    }
-                }
-                if (isChunkSize && [trimmed length] <= 8) continue; /* Skip chunk size */
-                [cleanBody appendString:line];
-                [cleanBody appendString:@"\n"];
+        completion:^(NSData *data, NSInteger status, NSError *error) {
+            if (error || status != 200) {
+                [_conversationHistory removeLastObject];
+                NSString *detail = error ? [error localizedDescription]
+                    : [NSString stringWithFormat:@"HTTP %ld: %@", (long)status,
+                       [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease] ?: @""];
+                [self _showResult:detail];
+                return;
             }
-            [self _processSSEChunk:cleanBody];
-            [rawBody release];
-        }
-
-        wolfSSL_shutdown(ssl);
-        wolfSSL_free(ssl);
-        wolfSSL_CTX_free(ctx);
-        close(sock);
-
-        dispatch_async(dispatch_get_main_queue(), ^{
             _isProcessing = NO;
             _typingDots.hidden = YES;
             if ([_streamBuf length] > 0) {
-                [_conversationHistory addObject:@{@"role": @"assistant", @"content": [_streamBuf copy]}];
-                /* Persist assistant response to app's DB */
-                _persistOverlayMessage(_streamBuf, 1); /* 1 = OCMessageRoleAssistant */
+                NSString *reply = [[_streamBuf copy] autorelease];
+                [_conversationHistory addObject:@{@"role": @"assistant", @"content": reply}];
+                _persistOverlayMessage(reply, 1); /* 1 = OCMessageRoleAssistant */
             }
-        });
-    });
+        }];
 }
 
-- (void)_processSSEChunk:(NSString *)chunk {
-    [_sseBuf appendString:chunk];
-    NSArray *lines = [_sseBuf componentsSeparatedByString:@"\n"];
-    [_sseBuf setString:[lines lastObject] ?: @""];
+/* runs on the main queue: CPTLSClient delivers chunks there */
+- (void)_handleSSELine:(NSString *)line {
+    if (![line hasPrefix:@"data:"]) return;
+    NSData *json = [[line substringFromIndex:5] dataUsingEncoding:NSUTF8StringEncoding];
+    NSDictionary *evt = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
+    if (![evt isKindOfClass:[NSDictionary class]]) return;
 
-    /* Debug: show raw first chunk if nothing streaming yet */
-    if ([_streamBuf length] == 0 && [chunk length] > 0 && [chunk length] < 200) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if ([_streamBuf length] == 0) {
-                _typingDots.hidden = YES;
-                _responseArea.textColor = [UIColor colorWithWhite:0.5f alpha:1];
-                _responseArea.text = [NSString stringWithFormat:@"[receiving data...]"];
-            }
-        });
-    }
-
-    for (NSUInteger i = 0; i < [lines count] - 1; i++) {
-        NSString *line = [lines objectAtIndex:i];
-        if (![line hasPrefix:@"data: "]) continue;
-        NSString *json = [line substringFromIndex:6];
-        if ([json isEqualToString:@"[DONE]"]) continue;
-        NSDictionary *evt = [NSJSONSerialization JSONObjectWithData:
-            [json dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
-        if (!evt) continue;
-        if ([[evt objectForKey:@"type"] isEqualToString:@"content_block_delta"]) {
-            NSString *text = [[evt objectForKey:@"delta"] objectForKey:@"text"];
-            if (text) {
-                [_streamBuf appendString:text];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    _typingDots.hidden = YES;
-                    _responseArea.textColor = [UIColor colorWithWhite:0.88f alpha:1];
-                    _responseArea.text = _streamBuf;
-                });
-            }
-        }
+    NSString *type = [evt objectForKey:@"type"];
+    if ([type isEqualToString:@"content_block_delta"]) {
+        NSString *text = [[evt objectForKey:@"delta"] objectForKey:@"text"];
+        if (![text isKindOfClass:[NSString class]]) return;
+        [_streamBuf appendString:text];
+        _typingDots.hidden = YES;
+        _responseArea.textColor = [UIColor colorWithWhite:0.88f alpha:1];
+        _responseArea.text = _streamBuf;
+    } else if ([type isEqualToString:@"error"]) {
+        NSString *message = [[evt objectForKey:@"error"] objectForKey:@"message"];
+        [_streamBuf appendFormat:@"\n[%@]", message ?: @"stream error"];
+        _responseArea.text = _streamBuf;
     }
 }
 
@@ -744,7 +619,7 @@ static void _persistOverlayMessage(NSString *content, int role) {
 - (void)refreshStatus {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *host = [prefs objectForKey:@"gatewayHost"];
-    BOOL hasKey = [[prefs objectForKey:@"apiKey"] length] > 0;
+    BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
 
     if (host && [host length] > 0) {
         _statusLabel.text = [NSString stringWithFormat:@"Gateway: %@", host];
@@ -851,7 +726,31 @@ static UIWindow *_cpWindow = nil;
 static CPAssistantPanel *_cpPanel = nil;
 static BOOL _cpGracePeriod = NO; /* Ignore home-up right after hold-to-show */
 
+@interface SBAwayController : NSObject
++ (id)sharedAwayController;
+- (BOOL)isLocked;
+- (void)unlockWithSound:(BOOL)sound unlockSource:(int)source;
+@end
+
+@interface SBDeviceLockController : NSObject
++ (id)sharedController;
+- (BOOL)isPasswordProtected;
+@end
+
+static BOOL CPDeviceIsLocked(void) {
+    id away = [%c(SBAwayController) sharedAwayController];
+    return [away respondsToSelector:@selector(isLocked)] && [away isLocked];
+}
+
+static BOOL CPDeviceHasPasscode(void) {
+    id lock = [%c(SBDeviceLockController) sharedController];
+    /* assume a passcode when the class is missing, so we never skip it */
+    return ![lock respondsToSelector:@selector(isPasswordProtected)] || [lock isPasswordProtected];
+}
+
 static void CPShow(void) {
+    /* the panel shows past conversations, so never draw it over the lock screen */
+    if (CPDeviceIsLocked()) return;
     if (!_cpWindow) {
         CGRect bounds = [[UIScreen mainScreen] bounds];
         _cpWindow = [[UIWindow alloc] initWithFrame:bounds];
@@ -896,8 +795,12 @@ static void CPDismiss(void) {
 %hook SpringBoard
 
 - (void)_menuButtonWasHeld {
+    /* on the lock screen keep voice control, which apple already limits there */
+    if (CPDeviceIsLocked()) {
+        %orig;
+        return;
+    }
     CPShow();
-    /* Do NOT call %orig — prevents Voice Control from launching */
 }
 
 /*
@@ -930,8 +833,9 @@ static void CPDismiss(void) {
 %hook SBAssistantController
 
 - (BOOL)handleSiriButtonPress {
+    if (CPDeviceIsLocked()) return %orig;
     CPShow();
-    return YES; /* Consume — don't launch Siri */
+    return YES;
 }
 
 %end
@@ -972,6 +876,7 @@ static NSString *const kCPWidgetSectionID = @"pro.matthesketh.legacypodclaw.nc-w
 - (void)_loadSections {
     %orig;
 
+    if (![self respondsToSelector:@selector(_weeAppForSectionID:)] || !%c(SBWeeApp)) return;
     if ([self _weeAppForSectionID:kCPWidgetSectionID]) return;
 
     NSBundle *wb = [NSBundle bundleWithPath:@"/System/Library/WeeAppPlugins/LegacyPodClawNC.bundle"];
@@ -986,10 +891,17 @@ static NSString *const kCPWidgetSectionID = @"pro.matthesketh.legacypodclaw.nc-w
     [wa setDelegate:self];
     [controller release];
 
-    NSMutableArray *weeApps = [self valueForKey:@"_weeApps"];
-    NSMutableArray *visible = [self valueForKey:@"_visibleWeeApps"];
-    if (weeApps) [weeApps addObject:wa];
-    if (visible) [visible insertObject:wa atIndex:0];
+    /* a wrong ivar name throws here at every boot, so catch it and skip the widget */
+    @try {
+        id weeApps = [self valueForKey:@"_weeApps"];
+        id visible = [self valueForKey:@"_visibleWeeApps"];
+        if ([weeApps isKindOfClass:[NSMutableArray class]]) [weeApps addObject:wa];
+        if ([visible isKindOfClass:[NSMutableArray class]]) [visible insertObject:wa atIndex:0];
+    } @catch (NSException *e) {
+        NSLog(@"[LegacyPodClaw] NC widget not added: %@", e);
+        [wa release];
+        return;
+    }
     [wa release];
 
     /* Reload table to show the new widget */
@@ -998,20 +910,6 @@ static NSString *const kCPWidgetSectionID = @"pro.matthesketh.legacypodclaw.nc-w
     NSLog(@"[LegacyPodClaw] NC widget injected");
 }
 
-/* Provide display name for our section in Settings > Notifications */
-- (id)tableView:(id)tv cellForRowAtIndexPath:(id)ip {
-    id cell = %orig;
-    /* Check if this is our section and set the label */
-    @try {
-        if ([cell respondsToSelector:@selector(textLabel)]) {
-            UILabel *label = [cell performSelector:@selector(textLabel)];
-            if (label && [[label text] length] == 0) {
-                /* Might be our unlabeled widget - check the section */
-            }
-        }
-    } @catch (NSException *e) {}
-    return cell;
-}
 
 %end
 
@@ -1078,7 +976,7 @@ static UILabel *_lsLabel = nil;
     if (_lsLabel) {
         NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
         NSString *host = [prefs objectForKey:@"gatewayHost"];
-        BOOL hasKey = [[prefs objectForKey:@"apiKey"] length] > 0;
+        BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
 
         if (host && [host length] > 0)
             _lsLabel.text = [NSString stringWithFormat:@"LegacyPodClaw - %@", host];
@@ -1098,69 +996,65 @@ static UILabel *_lsLabel = nil;
  * Hook SBAwayController's camera gesture to show our overlay instead.
  */
 
-@interface SBAwayController : NSObject
-+ (id)sharedAwayController;
-- (BOOL)handleMenuButtonHeld;
-- (void)unlockWithSound:(BOOL)sound unlockSource:(int)source;
-@end
+/*
+ * With no passcode, the camera gestures unlock and open the overlay.
+ * With a passcode, they keep apple's camera, because unlockWithSound:
+ * would skip the passcode.
+ */
+static void CPUnlockAndShow(id away) {
+    [away unlockWithSound:YES unlockSource:0];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{ CPShow(); });
+}
 
 %hook SBAwayController
 
-/* Replace camera gestures with LegacyPodClaw activation */
 - (void)handleCameraPanGesture:(id)gesture {
-    /* Don't call %orig — prevents camera view from appearing.
-       The gesture recognizer still tracks — when it ends,
-       _handleCameraPanGestureEndedWithVelocity: fires and opens LegacyPodClaw. */
+    if (CPDeviceHasPasscode()) %orig;
 }
 
 - (void)handleCameraTapGesture:(id)gesture {
-    /* Tap on the grabber area → open LegacyPodClaw */
-    @try {
-        [self unlockWithSound:YES unlockSource:0];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{ CPShow(); });
-    } @catch (NSException *e) {}
+    if (CPDeviceHasPasscode()) {
+        %orig;
+        return;
+    }
+    CPUnlockAndShow(self);
 }
 
-/* Hide the camera view that sits behind the lock screen */
 - (void)_setupCameraSlideUpAnimation {
-    /* Don't call %orig — prevents camera view from being set up */
+    if (CPDeviceHasPasscode()) %orig;
 }
 
 - (void)_setupCameraSlideDownAnimation {
-    /* Don't call %orig */
+    if (CPDeviceHasPasscode()) %orig;
 }
 
 - (void)_handleCameraPanGestureEndedWithVelocity:(float)velocity {
-    /* Instead of opening camera on gesture end, unlock and show LegacyPodClaw */
-    @try {
-        [self unlockWithSound:YES unlockSource:0];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{ CPShow(); });
-    } @catch (NSException *e) {}
-    /* Don't call %orig — prevents camera from ever appearing */
+    if (CPDeviceHasPasscode()) {
+        %orig;
+        return;
+    }
+    CPUnlockAndShow(self);
 }
 
 - (void)_activateCameraAfterCall {
-    /* Block */
+    if (CPDeviceHasPasscode()) %orig;
 }
 
 - (void)activateCamera {
-    /* Block camera entirely — open LegacyPodClaw instead */
-    @try {
-        [self unlockWithSound:YES unlockSource:0];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{ CPShow(); });
-    } @catch (NSException *e) {}
+    if (CPDeviceHasPasscode()) {
+        %orig;
+        return;
+    }
+    CPUnlockAndShow(self);
 }
 
 - (void)activateCameraWithNewSessionID:(BOOL)newSession afterCall:(BOOL)afterCall {
-    /* Block this path too */
-    @try {
-        [self unlockWithSound:YES unlockSource:0];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{ CPShow(); });
-    } @catch (NSException *e) {}
+    if (CPDeviceHasPasscode()) {
+        %orig;
+        return;
+    }
+    CPUnlockAndShow(self);
 }
 
 %end
@@ -1228,44 +1122,25 @@ static UILabel *_lsLabel = nil;
 %hook SBVoiceControlController
 
 - (BOOL)handleHomeButtonHeld {
-    /* Already intercepted by _menuButtonWasHeld, but just in case */
+    if (CPDeviceIsLocked()) return %orig;
     CPShow();
     return YES;
 }
 
 - (void)_performDelayedHeadsetActionForVoiceControl {
-    /* BT headset long-press → LegacyPodClaw instead of Voice Control */
+    if (CPDeviceIsLocked()) {
+        %orig;
+        return;
+    }
     CPShow();
 }
 
 - (void)_performDelayedHeadsetActionForAssistant {
-    /* BT headset → LegacyPodClaw instead of Siri */
-    CPShow();
-}
-
-%end
-
-#pragma mark - Media Controller Integration
-
-/*
- * When LegacyPodClaw TTS is speaking, show it in the Now Playing controls.
- */
-
-@interface SBMediaController : NSObject
-+ (id)sharedInstance;
-- (id)nowPlayingApplication;
-- (NSString *)nowPlayingTitle;
-@end
-
-%hook SBMediaController
-
-- (id)nowPlayingTitle {
-    /* If LegacyPodClaw is speaking, show that */
-    NSString *orig = %orig;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/tmp/clawpod-speaking"]) {
-        return @"LegacyPodClaw is speaking...";
+    if (CPDeviceIsLocked()) {
+        %orig;
+        return;
     }
-    return orig;
+    CPShow();
 }
 
 %end
@@ -1294,8 +1169,7 @@ static UILabel *_lsLabel = nil;
     int badgeToken;
     notify_register_dispatch("pro.matthesketh.legacypodclaw/updateBadge", &badgeToken,
         dispatch_get_main_queue(), ^(int t) {
-            NSDictionary *data = [NSDictionary dictionaryWithContentsOfFile:
-                @"/tmp/clawpod-badge.plist"];
+            NSDictionary *data = [NSDictionary dictionaryWithContentsOfFile:CPSharedPath(CP_BADGE_FILE)];
             NSNumber *count = [data objectForKey:@"count"];
             if (!count) return;
 
@@ -1307,12 +1181,20 @@ static UILabel *_lsLabel = nil;
             }
         });
 
+    /* CPShow checks the lock only on open, so hide the panel when the device locks with it showing */
+    int lockToken;
+    notify_register_dispatch("com.apple.springboard.lockcomplete", &lockToken,
+        dispatch_get_main_queue(), ^(int t) {
+            if (!_cpWindow) return;
+            if (_cpPanel.isVisible) [_cpPanel dismiss];
+            _cpWindow.hidden = YES;
+        });
+
     /* Listen for banner requests */
     int bannerToken;
     notify_register_dispatch("pro.matthesketh.legacypodclaw/showBanner", &bannerToken,
         dispatch_get_main_queue(), ^(int t) {
-            NSDictionary *data = [NSDictionary dictionaryWithContentsOfFile:
-                @"/tmp/openclaw-banner.plist"];
+            NSDictionary *data = [NSDictionary dictionaryWithContentsOfFile:CPSharedPath(CP_BANNER_FILE)];
             if (!data) return;
 
             Class BBBulletin = %c(BBBulletin);
@@ -1327,10 +1209,11 @@ static UILabel *_lsLabel = nil;
                 [[NSDate date] timeIntervalSince1970]] forKey:@"bulletinID"];
 
             id bc = [%c(SBBulletinBannerController) sharedInstance];
-            if (bc) {
+            SEL addSel = @selector(observer:addBulletin:forFeed:);
+            if ([bc respondsToSelector:addSel]) {
+                /* feed is a scalar, which performSelector:withObject:withObject: cannot pass */
                 @try {
-                    [bc performSelector:@selector(observer:addBulletin:forFeed:)
-                             withObject:nil withObject:bulletin];
+                    ((void (*)(id, SEL, id, id, unsigned))objc_msgSend)(bc, addSel, nil, bulletin, 2);
                 } @catch (NSException *e) {}
             }
             [bulletin release];
@@ -1417,7 +1300,7 @@ static UIView *_buildDashboard(CGRect frame) {
     /* Status cards */
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *host = [prefs objectForKey:@"gatewayHost"];
-    BOOL hasKey = [[prefs objectForKey:@"apiKey"] length] > 0;
+    BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
 
     UIView *statusCard = [[[UIView alloc] initWithFrame:CGRectMake(10, y, w-20, 50)] autorelease];
     statusCard.backgroundColor = [UIColor colorWithWhite:1 alpha:0.1f];
@@ -1436,7 +1319,7 @@ static UIView *_buildDashboard(CGRect frame) {
 
     UILabel *modelLabel = [[[UILabel alloc] initWithFrame:CGRectMake(12, 26, w-44, 16)] autorelease];
     modelLabel.text = [NSString stringWithFormat:@"Model: %@",
-        [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514"];
+        LPCAnthropicModel(prefs)];
     modelLabel.textColor = [UIColor colorWithWhite:0.7f alpha:1];
     modelLabel.font = [UIFont systemFontOfSize:11];
     modelLabel.backgroundColor = [UIColor clearColor];
@@ -1603,16 +1486,27 @@ static void _cpShowDashboard(id self_) {
     } @catch (NSException *e) {}
 }
 
+/* the dashboard replaces spotlight, so let the user turn it off and get spotlight back */
+static BOOL CPDashboardEnabled(void) {
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
+    id value = [prefs objectForKey:@"spotlightDashboard"];
+    return value ? [value boolValue] : YES;
+}
+
 %hook SBIconController
 
 - (void)_showSearchKeyboardIfNecessary:(BOOL)necessary {
-    /* Don't call %orig — replaces Spotlight with dashboard */
+    if (!CPDashboardEnabled()) {
+        %orig;
+        return;
+    }
     _cpShowDashboard(self);
 }
 
 /* Also show dashboard during scroll (handles slow drags) */
 - (void)scrollViewDidScroll:(id)scrollView {
     %orig;
+    if (!CPDashboardEnabled()) return;
 
     @try {
         BOOL showingSearch = [self isShowingSearch];
@@ -1726,87 +1620,44 @@ static void _cpRestoreDockAndCleanup(id self_) {
 
 %end
 
-#pragma mark - Multi-Process Hooks
+#pragma mark - Lock Screen Images
 
-/*
- * These hooks apply to apps OTHER than SpringBoard.
- * The tweak is now injected into all UIKit processes.
- * We use %ctor to check the bundle ID and only apply relevant hooks.
- */
+/* serve our camera grabber art without replacing apple's files in SpringBoard.app */
+static NSString *const kCPImageDir = @"/Library/Application Support/LegacyPodClaw/Images";
 
-/*
- * Safari: Add "Ask LegacyPodClaw" to action sheets, intercept URL loading
- * for AI-powered page summaries.
- */
-%group SafariHooks
+%hook UIImage
 
-%hook BrowserController
-
-- (void)loadURL:(id)url {
-    %orig;
-    /* Log URL loads - can be used for browsing history AI analysis */
-    NSLog(@"[LegacyPodClaw/Safari] URL loaded: %@", url);
++ (id)imageNamed:(NSString *)name {
+    static NSSet *names;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        names = [[NSSet alloc] initWithObjects:@"CameraGrabber", @"DefaultCameraUI", @"LockScreenCameraShadow", nil];
+    });
+    /* this runs for every image springboard loads, so reject most names cheaply */
+    if (![name isKindOfClass:[NSString class]] || ![name rangeOfString:@"Camera"].length) return %orig;
+    NSString *base = [[name stringByDeletingPathExtension] stringByReplacingOccurrencesOfString:@"~iphone" withString:@""];
+    base = [base stringByReplacingOccurrencesOfString:@"@2x" withString:@""];
+    if ([names containsObject:base]) {
+        NSString *path = [kCPImageDir stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"%@@2x~iphone.png", base]];
+        UIImage *img = [UIImage imageWithContentsOfFile:path];
+        if (img) return img;
+    }
+    return %orig;
 }
 
 %end
 
-%end /* SafariHooks */
+#pragma mark - Shake
 
-/*
- * MobileSMS: Monitor for replies in the LegacyPodClaw chat thread.
- * Auto-detect when user replies and route to the daemon.
- */
-%group SMSHooks
-
-%hook CKConversationListController
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    /* Notify daemon to check for LegacyPodClaw replies */
-    notify_post("pro.matthesketh.legacypodclaw/checkSMSReplies");
-}
-
-%end
-
-%end /* SMSHooks */
-
-/*
- * MobileMail: Add "Summarize with LegacyPodClaw" option.
- */
-%group MailHooks
-
-%hook MFMessageBody
-
-- (id)htmlContent {
-    id content = %orig;
-    /* Could inject a "Summarize" button here */
-    return content;
-}
-
-%end
-
-%end /* MailHooks */
-
-/*
- * Music: Show LegacyPodClaw status in now playing.
- */
-%group MusicHooks
-%end
-
-/*
- * Universal hooks (all UIKit apps): add shake-to-ask gesture.
- */
+/* shake-to-ask; the filter plist loads the tweak only into springboard */
 %group UniversalHooks
 
 %hook UIWindow
 
 - (void)motionEnded:(int)motion withEvent:(id)event {
     %orig;
-    /* Shake gesture (motion == 1) opens LegacyPodClaw in any app */
-    if (motion == 1) {
-        /* Send notification to SpringBoard to show overlay */
-        notify_post("pro.matthesketh.legacypodclaw/shakeActivate");
-    }
+    if (motion == 1) CPShow();
 }
 
 %end
@@ -1829,31 +1680,6 @@ static void _cpRestoreDockAndCleanup(id self_) {
         %init(_ungrouped);
         NSLog(@"[LegacyPodClaw] Loaded in SpringBoard");
 
-        /* Listen for shake-activate from other apps */
-        int token;
-        notify_register_dispatch("pro.matthesketh.legacypodclaw/shakeActivate", &token,
-            dispatch_get_main_queue(), ^(int t) {
-                CPShow();
-            });
-
-    } else if ([bundleId isEqualToString:@"com.apple.mobilesafari"]) {
-        %init(SafariHooks);
-        NSLog(@"[LegacyPodClaw] Loaded in Safari");
-
-    } else if ([bundleId isEqualToString:@"com.apple.MobileSMS"]) {
-        %init(SMSHooks);
-        NSLog(@"[LegacyPodClaw] Loaded in Messages");
-
-    } else if ([bundleId isEqualToString:@"com.apple.mobilemail"]) {
-        %init(MailHooks);
-        NSLog(@"[LegacyPodClaw] Loaded in Mail");
-
-    } else if ([bundleId isEqualToString:@"com.apple.Music"]) {
-        %init(MusicHooks);
-        NSLog(@"[LegacyPodClaw] Loaded in Music");
+        %init(UniversalHooks);
     }
-
-    /* Universal hooks for ALL apps (including SpringBoard) */
-    %init(UniversalHooks);
-    NSLog(@"[LegacyPodClaw] Universal hooks loaded in %@", bundleId);
 }

@@ -26,7 +26,7 @@ When you change the provider, the app clears the model ID.
 For Anthropic only, you can also use the Settings app: **Settings > LegacyPodClaw > Local Agent**. Enter the key in **Anthropic Key**. The **Provider** list there also selects the provider, but the key and base URL for other providers are only in the app.
 
 {{< alert type="note" title="Overlay and widget" >}}
-The home-button overlay and the Notification Center widget always use Anthropic and the Anthropic key. They use the **Model** setting only when the provider is Anthropic. Otherwise they use `claude-sonnet-5-5`.
+The home-button overlay, the Notification Center widget and the dashboard use the provider, the model and the key that you set in the app.
 {{< /alert >}}
 
 See [AI Providers](/guide/providers/) for the list of providers.

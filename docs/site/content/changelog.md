@@ -14,6 +14,7 @@ Version 0.4.0 is a full rewrite of the app's network, secret, tool and package c
 - `CPFetch` sends a one-shot request. It refuses each scheme other than `http` and `https`. Before, `http_fetch` could read `file://` URLs.
 - A long-lived wolfSSL connection carries the Discord and Slack WebSockets and IRC over TLS.
 - The Notification Center widget sends HTTPS through the tweak's wolfSSL client.
+- wolfSSL seeds its random number generator from `/dev/urandom`, and it accepts 4096-bit RSA roots.
 
 ### clawpodd and secrets
 
@@ -37,6 +38,7 @@ Version 0.4.0 is a full rewrite of the app's network, secret, tool and package c
 
 ### SpringBoard tweak
 
+- The overlay, the Notification Center widget and the dashboard use the provider and model that you set in the app.
 - The overlay does not open on the lock screen, and it hides when the device locks.
 - With a passcode set, the lock screen camera keeps Apple's behaviour.
 - The Notification Center widget does not run while the device is locked with a passcode.

@@ -60,7 +60,7 @@ The overlay never opens while the device is locked. The overlay and the widget h
 - The Anthropic Messages API. The default model is `claude-sonnet-5-5`. The suggested models are `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5` and `claude-fable-5-1`.
 - OpenAI-compatible chat completions. OpenAI, Google Gemini (through its OpenAI-compatible endpoint), Groq, Together AI, OpenRouter, Mistral, DeepSeek, Ollama and a custom endpoint use it.
 
-Each provider keeps its own API key in the keychain. HTTPS goes through wolfSSL. Plain HTTP is allowed for a local server such as Ollama. There is no automatic failover between providers. The home-button overlay and the Notification Center widget always use Anthropic. The widget needs the SpringBoard tweak, because it sends HTTPS through the tweak's wolfSSL client.
+Each provider keeps its own API key in the keychain. HTTPS goes through wolfSSL. Plain HTTP is allowed for a local server such as Ollama. There is no automatic failover between providers. The home-button overlay and the Notification Center widget use the same provider as the app. The widget needs the SpringBoard tweak, because it sends HTTPS through the tweak's wolfSSL client.
 
 **Tools.** The app has tools for the shell, files, the web, Notes, Reminders (EventKit) and Messages. It also has system controls (brightness, volume, Wi-Fi, app launch, lock), YouTube music, device information and a persistent memory. Every tool call goes through one dispatcher. The dispatcher checks the input, applies the path guardrails, enforces a timeout and asks you before a risky tool runs. The approval alert has **Allow** and **Deny** buttons. Up to two MCP servers can add more tools.
 

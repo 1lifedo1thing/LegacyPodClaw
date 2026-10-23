@@ -29,7 +29,7 @@ The overlay is a quick text chat.
 2. Type a question and tap **Send**. The reply streams into the overlay.
 3. To close the overlay, press the home button or tap the close button.
 
-The overlay has no tools. It always uses Anthropic. It keeps the last 10 messages and saves them in the app's **Quick Ask** session. It does not open while the device is locked.
+The overlay has no tools. It uses the provider and model that you set in the app. It keeps the last 10 messages and saves them in the app's **Quick Ask** session. It does not open while the device is locked.
 
 ## The app
 

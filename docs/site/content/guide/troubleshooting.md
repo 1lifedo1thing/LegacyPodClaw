@@ -36,9 +36,9 @@ The app shows **Not Saved** when `clawpodd` does not store a value.
 2. Check that `clawpodd` runs: `launchctl list | grep legacypodclaw`.
 3. If it does not run, load it: `launchctl load /Library/LaunchDaemons/pro.matthesketh.legacypodclaw.daemon.plist`.
 
-## The overlay says "No API key set"
+## The overlay or the widget says "Not Configured"
 
-The overlay and the Notification Center widget use only the Anthropic key. Enter it in **Settings > LegacyPodClaw > Local Agent > Anthropic Key**, or select Anthropic in the app and enter the key there.
+The overlay and the Notification Center widget use the provider that you set in the app. That provider needs a base URL and, if it asks for one, an API key. Open the app, tap the gear button and set them.
 
 ## High memory use
 

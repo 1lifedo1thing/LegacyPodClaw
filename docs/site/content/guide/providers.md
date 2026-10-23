@@ -11,7 +11,7 @@ LegacyPodClaw has two provider adapters. Both stream the reply and support tool 
 
 Select one provider in the app: tap the gear button, then **Model Provider > Provider**. The in-app chat, the chat channels and the gateway server use this provider. There is no automatic failover to a different provider.
 
-The home-button overlay and the Notification Center widget always use the Anthropic provider.
+The home-button overlay and the Notification Center widget use the same provider and model as the app. They send text only, with no tools.
 
 ## Provider list
 

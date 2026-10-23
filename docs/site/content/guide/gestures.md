@@ -6,7 +6,7 @@ weight: 1
 
 The LegacyPodClaw tweak is a MobileSubstrate tweak. Its filter loads it only into SpringBoard (`com.apple.springboard`). It does not load into other apps.
 
-The overlay and the Notification Center widget use Anthropic only. See [Configuration](/getting-started/configuration/).
+The overlay and the Notification Center widget use the provider and model that you set in the app. See [Configuration](/getting-started/configuration/).
 
 ## Home-button hold
 

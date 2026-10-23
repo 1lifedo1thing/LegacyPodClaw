@@ -219,7 +219,11 @@ static const NSUInteger kDiscordIntents = (1 << 0) | (1 << 9) | (1 << 12) | (1 <
 #pragma mark - Sending
 
 - (NSDictionary *)_headers {
-    return @{@"Authorization": [@"Bot " stringByAppendingString:_botToken], @"User-Agent": @"DiscordBot (legacypodclaw, 0.3)"};
+    /* discord wants "DiscordBot (url, version)"; the bundle version keeps it current at each release */
+    NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    if (![version isKindOfClass:[NSString class]] || [version length] == 0) version = @"0";
+    NSString *agent = [NSString stringWithFormat:@"DiscordBot (https://github.com/wrxck/LegacyPodClaw, %@)", version];
+    return @{@"Authorization": [@"Bot " stringByAppendingString:_botToken], @"User-Agent": agent};
 }
 
 - (void)sendMessage:(NSString *)text toChatId:(NSString *)chatId threadId:(NSString *)threadId {

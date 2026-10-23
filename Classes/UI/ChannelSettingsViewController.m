@@ -76,6 +76,14 @@ static NSDictionary *Field(NSString *label, NSString *key, NSString *type, NSStr
     return [NSString stringWithFormat:@"%@\n\n%@", [notes objectForKey:cid] ?: @"", common];
 }
 
++ (NSString *)stateTextForChannel:(NSString *)cid {
+    NSDictionary *status = [[[AppDelegate shared].channelManager allChannelStatus] objectForKey:cid];
+    if (!status) return @"Off";
+    if ([[status objectForKey:@"connected"] boolValue]) return @"Connected";
+    if ([[status objectForKey:@"state"] isEqual:@"stopped"]) return @"Stopped";
+    return [[status objectForKey:@"lastError"] length] ? @"Retrying" : @"Connecting…";
+}
+
 - (id)initWithTitle:(NSString *)title fields:(NSArray *)fields footer:(NSString *)footer {
     if ((self = [super initWithStyle:UITableViewStyleGrouped])) {
         self.title = title;
@@ -155,15 +163,10 @@ static NSDictionary *Field(NSString *label, NSString *key, NSString *type, NSStr
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [[[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil] autorelease];
     if (indexPath.section == 1) {
-        NSDictionary *status = [self _status];
         cell.textLabel.text = @"Status";
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        NSString *err = [status objectForKey:@"lastError"];
-        NSString *state = [status objectForKey:@"state"];
         /* the full error is in the footer below the row */
-        cell.detailTextLabel.text = !status ? @"Off" : [[status objectForKey:@"connected"] boolValue] ? @"Connected"
-                                  : [state isEqual:@"stopped"] ? @"Stopped"
-                                  : [err length] ? @"Retrying" : @"Connecting…";
+        cell.detailTextLabel.text = [OCChannelSettingsViewController stateTextForChannel:[self _channelId]];
         return cell;
     }
     NSDictionary *field = [_fields objectAtIndex:indexPath.row];

@@ -72,7 +72,10 @@ static NSString *StringField(NSDictionary *d, NSString *key) {
 }
 
 - (NSDictionary *)statusInfo {
-    return @{@"callback": [[NSURL URLWithString:_callbackURL] host] ?: @""};
+    /* a callback url that is not http or https never starts, so say so instead of connecting for ever */
+    if (![self isConfigured])
+        return @{@"callback": @"", @"state": @"stopped", @"lastError": @"The callback URL must start with http:// or https://."};
+    return @{@"callback": [[NSURL URLWithString:_callbackURL] host] ?: @"", @"state": _running ? @"connected" : @"stopped"};
 }
 
 @end

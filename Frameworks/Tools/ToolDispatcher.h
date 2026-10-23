@@ -10,13 +10,6 @@
 #import <Foundation/Foundation.h>
 #import "Agent.h"
 
-/* who asked for the call, shown in the confirmation dialog */
-typedef NS_ENUM(NSUInteger, OCToolCaller) {
-    OCToolCallerChat = 0,
-    OCToolCallerAgent,
-    OCToolCallerRemote,
-};
-
 @interface OCToolDispatcher : NSObject
 
 + (instancetype)shared;

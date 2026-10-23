@@ -1,18 +1,10 @@
-/*
- * OCDiscordChannel.h
- * LegacyPodClaw - Discord Bot Channel
- *
- * Connects via Discord Gateway WebSocket + REST API for sending.
- * Supports: text messages, replies, typing, guilds, threads.
- */
+/* discord bot: gateway websocket for inbound, rest api for replies */
 
 #import <Foundation/Foundation.h>
 #import "ChannelManager.h"
-#import "WebSocket.h"
+#import "TLSWebSocket.h"
 
-@interface OCDiscordChannel : NSObject <OCChannel, OCWebSocketDelegate>
-@property (nonatomic, copy) NSString *botToken;
-@property (nonatomic, retain) NSArray *allowedGuildIds;
-@property (nonatomic, assign) id<OCChannelManagerDelegate> messageDelegate;
+@interface OCDiscordChannel : NSObject <OCChannel, OCTLSWebSocketDelegate>
+@property (nonatomic, assign) id<OCChannelDelegate> messageDelegate;
 - (instancetype)initWithBotToken:(NSString *)token;
 @end

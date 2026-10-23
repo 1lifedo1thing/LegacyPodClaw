@@ -1,141 +1,258 @@
-/*
- * OCIRCChannel.m
- * LegacyPodClaw - IRC Client Implementation
- *
- * Plain TCP with NSStream. Handles NICK, USER, JOIN, PRIVMSG, PING/PONG.
- */
+/* irc channel: in a room the bot answers only lines addressed to its nick; replies are paced to avoid flood kicks */
 
 #import "IRCChannel.h"
 
+static const NSUInteger kIRCMaxLine = 2048;
+static const NSUInteger kIRCChunkChars = 380;
+static const NSUInteger kIRCMaxReplyLines = 15;
+static const NSTimeInterval kIRCLineInterval = 1.0;
+
 @interface OCIRCChannel () {
-    NSInputStream *_input;
-    NSOutputStream *_output;
+    NSString *_server;
+    int _port;
+    BOOL _useTLS;
+    NSString *_nickname;
+    NSString *_currentNick;
+    CPTLSConnection *_conn;
     NSMutableData *_readBuf;
-    BOOL _running, _connected, _registered;
+    NSMutableArray *_outQueue;
+    NSTimer *_sendTimer;
+    BOOL _running, _registered;
+    NSTimeInterval _backoff;
+    NSUInteger _generation;
+    NSString *_lastError;
 }
 @end
 
 @implementation OCIRCChannel
-@synthesize channelId = _channelId;
-@synthesize isConnected = _connected;
 
-- (instancetype)initWithServer:(NSString *)server nickname:(NSString *)nick {
+@synthesize messageDelegate = _messageDelegate;
+
+- (instancetype)initWithServer:(NSString *)server port:(int)port useTLS:(BOOL)useTLS nickname:(NSString *)nick {
     if ((self = [super init])) {
-        _server = [server copy]; _nickname = [nick copy];
-        _port = 6667; _channelId = @"irc";
+        _server = [server copy];
+        _port = port > 0 ? port : (useTLS ? 6697 : 6667);
+        _useTLS = useTLS;
+        _nickname = [nick copy];
         _readBuf = [[NSMutableData alloc] initWithCapacity:1024];
+        _outQueue = [[NSMutableArray alloc] init];
     }
     return self;
 }
+
 - (void)dealloc {
-    [self stop]; [_server release]; [_nickname release]; [_password release];
-    [_channels release]; [_readBuf release];
+    [self _teardown];
+    [_server release]; [_nickname release]; [_currentNick release]; [_password release];
+    [_channels release]; [_readBuf release]; [_outQueue release]; [_lastError release];
     [super dealloc];
 }
-- (BOOL)isConfigured { return _server && _nickname; }
+
+- (NSString *)channelId { return @"irc"; }
+- (BOOL)isConnected { return _registered; }
+- (BOOL)isConfigured { return [_server length] > 0 && [_nickname length] > 0; }
 
 - (void)start {
-    if (_running) return;
+    if (_running || ![self isConfigured]) return;
     _running = YES;
-    CFReadStreamRef r; CFWriteStreamRef w;
-    CFStreamCreatePairWithSocketToHost(NULL, (__bridge CFStringRef)_server, _port, &r, &w);
-    _input = (NSInputStream *)r; _output = (NSOutputStream *)w;
-    if (_useTLS) {
-        NSDictionary *tls = @{(id)kCFStreamSSLLevel: (id)kCFStreamSocketSecurityLevelNegotiatedSSL};
-        [_input setProperty:tls forKey:(id)kCFStreamPropertySSLSettings];
-        [_output setProperty:tls forKey:(id)kCFStreamPropertySSLSettings];
-    }
-    [_input setDelegate:self]; [_output setDelegate:self];
-    [_input scheduleInRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    [_output scheduleInRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-    [_input open]; [_output open];
+    _backoff = 0;
+    [self _connect];
 }
 
 - (void)stop {
-    _running = NO; _connected = NO; _registered = NO;
-    [_input close]; [_output close];
-    [_input release]; _input = nil; [_output release]; _output = nil;
+    if (_conn && _registered) [_conn sendData:[@"QUIT :bye\r\n" dataUsingEncoding:NSUTF8StringEncoding]];
+    _running = NO;
+    _generation++;
+    [self _teardown];
 }
 
-- (void)stream:(NSStream *)s handleEvent:(NSStreamEvent)ev {
-    if (s == _output && ev == NSStreamEventOpenCompleted) {
-        if (_password) [self _send:[NSString stringWithFormat:@"PASS %@", _password]];
-        [self _send:[NSString stringWithFormat:@"NICK %@", _nickname]];
-        [self _send:[NSString stringWithFormat:@"USER %@ 0 * :LegacyPodClaw Bot", _nickname]];
-    } else if (s == _input && ev == NSStreamEventHasBytesAvailable) {
-        uint8_t buf[1024];
-        NSInteger n = [_input read:buf maxLength:1024];
-        if (n > 0) { [_readBuf appendBytes:buf length:n]; [self _processLines]; }
-    } else if (ev == NSStreamEventErrorOccurred || ev == NSStreamEventEndEncountered) {
-        _connected = NO;
-        if (_running) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5*NSEC_PER_SEC),
-            dispatch_get_main_queue(), ^{ [self stop]; [self start]; });
-    }
-}
-
-- (void)_processLines {
-    NSString *all = [[NSString alloc] initWithData:_readBuf encoding:NSUTF8StringEncoding];
-    if (!all) { [all release]; return; }
-    NSArray *lines = [all componentsSeparatedByString:@"\r\n"];
-    [all release];
-    /* Keep incomplete last line in buffer */
-    NSString *last = [lines lastObject];
+- (void)_teardown {
+    _registered = NO;
+    [_sendTimer invalidate]; _sendTimer = nil;
+    [_outQueue removeAllObjects];
+    _conn.delegate = nil;
+    [_conn close];
+    [_conn release]; _conn = nil;
     [_readBuf setLength:0];
-    if ([last length] > 0) [_readBuf appendData:[last dataUsingEncoding:NSUTF8StringEncoding]];
+}
 
-    for (NSUInteger i = 0; i < [lines count] - 1; i++) {
-        [self _handleLine:[lines objectAtIndex:i]];
+- (void)_connect {
+    [self _teardown];
+    [_currentNick release];
+    _currentNick = [_nickname copy];
+    _conn = [[CPTLSConnection alloc] initWithHost:_server port:_port useTLS:_useTLS];
+    _conn.delegate = self;
+    [_conn open];
+}
+
+#pragma mark - Connection
+
+- (void)connectionDidOpen:(CPTLSConnection *)connection {
+    if ([_password length]) [self _sendNow:[NSString stringWithFormat:@"PASS %@", _password]];
+    [self _sendNow:[NSString stringWithFormat:@"NICK %@", _currentNick]];
+    [self _sendNow:[NSString stringWithFormat:@"USER %@ 0 * :LegacyPodClaw", _currentNick]];
+}
+
+- (void)connection:(CPTLSConnection *)connection didCloseWithError:(NSError *)error {
+    [_lastError release];
+    _lastError = [[error localizedDescription] copy];
+    [self _teardown];
+    if (!_running) return;
+    _backoff = MIN(MAX(_backoff * 2, 5.0), 300.0);
+    NSUInteger gen = ++_generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(_backoff * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (gen == _generation && _running) [self _connect];
+    });
+}
+
+- (void)connection:(CPTLSConnection *)connection didReceiveData:(NSData *)data {
+    [_readBuf appendData:data];
+    while (YES) {
+        const char *p = [_readBuf bytes];
+        NSUInteger len = [_readBuf length], eol = NSNotFound;
+        for (NSUInteger i = 0; i < len; i++) if (p[i] == '\n') { eol = i; break; }
+        if (eol == NSNotFound) {
+            if (len > kIRCMaxLine) [_readBuf setLength:0];
+            return;
+        }
+        NSUInteger end = (eol > 0 && p[eol - 1] == '\r') ? eol - 1 : eol;
+        NSString *line = [[NSString alloc] initWithBytes:p length:end encoding:NSUTF8StringEncoding];
+        if (!line) line = [[NSString alloc] initWithBytes:p length:end encoding:NSISOLatin1StringEncoding];
+        [_readBuf replaceBytesInRange:NSMakeRange(0, eol + 1) withBytes:NULL length:0];
+        if (end <= kIRCMaxLine) [self _handleLine:line];
+        [line release];
+        if (!_conn) return;
     }
 }
+
+#pragma mark - Protocol
 
 - (void)_handleLine:(NSString *)line {
-    if ([line hasPrefix:@"PING"]) {
-        [self _send:[line stringByReplacingOccurrencesOfString:@"PING" withString:@"PONG"]];
-        return;
+    NSString *prefix = nil;
+    NSString *rest = line;
+    if ([rest hasPrefix:@":"]) {
+        NSRange sp = [rest rangeOfString:@" "];
+        if (sp.location == NSNotFound) return;
+        prefix = [rest substringWithRange:NSMakeRange(1, sp.location - 1)];
+        rest = [rest substringFromIndex:sp.location + 1];
     }
-    /* :nick!user@host PRIVMSG #channel :message */
-    if ([line rangeOfString:@" PRIVMSG "].location != NSNotFound) {
-        NSRange bang = [line rangeOfString:@"!"];
-        NSString *nick = bang.location != NSNotFound ? [line substringWithRange:NSMakeRange(1, bang.location-1)] : @"?";
-        NSArray *parts = [line componentsSeparatedByString:@" PRIVMSG "];
-        if ([parts count] < 2) return;
-        NSString *rest = [parts objectAtIndex:1];
-        NSRange colon = [rest rangeOfString:@" :"];
-        if (colon.location == NSNotFound) return;
-        NSString *target = [rest substringToIndex:colon.location];
-        NSString *text = [rest substringFromIndex:colon.location + 2];
-
-        OCChannelMessage *msg = [[[OCChannelMessage alloc] init] autorelease];
-        msg.channelId = @"irc"; msg.chatId = target; msg.senderId = nick;
-        msg.senderName = nick; msg.text = text;
-        msg.isGroup = [target hasPrefix:@"#"]; msg.isDirect = !msg.isGroup;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [_messageDelegate channelManager:nil didReceiveMessage:msg];
-        });
+    NSString *trailing = nil;
+    NSRange colon = [rest rangeOfString:@" :"];
+    if (colon.location != NSNotFound) {
+        trailing = [rest substringFromIndex:colon.location + 2];
+        rest = [rest substringToIndex:colon.location];
+    } else if ([rest hasPrefix:@":"]) {
+        trailing = [rest substringFromIndex:1];
+        rest = @"";
     }
-    /* RPL_WELCOME (001) - registered */
-    if ([line rangeOfString:@" 001 "].location != NSNotFound) {
-        _registered = YES; _connected = YES;
-        for (NSString *ch in _channels) [self _send:[NSString stringWithFormat:@"JOIN %@", ch]];
+    NSArray *parts = [rest componentsSeparatedByString:@" "];
+    NSString *command = [[parts objectAtIndex:0] uppercaseString];
+
+    if ([command isEqualToString:@"PING"]) {
+        NSString *token = trailing ?: ([parts count] > 1 ? [parts objectAtIndex:1] : @"");
+        [self _sendNow:[NSString stringWithFormat:@"PONG :%@", token]];
+    } else if ([command isEqualToString:@"001"]) {
+        _registered = YES;
+        _backoff = 0;
+        [_lastError release]; _lastError = nil;
+        if ([parts count] > 1) { [_currentNick release]; _currentNick = [[parts objectAtIndex:1] copy]; }
+        for (NSString *ch in _channels) {
+            if ([ch hasPrefix:@"#"] || [ch hasPrefix:@"&"]) [self _sendNow:[NSString stringWithFormat:@"JOIN %@", ch]];
+        }
+    } else if ([command isEqualToString:@"433"] && !_registered) {
+        NSString *next = [_currentNick stringByAppendingString:@"_"];
+        [_currentNick release];
+        _currentNick = [next copy];
+        [self _sendNow:[NSString stringWithFormat:@"NICK %@", _currentNick]];
+    } else if ([command isEqualToString:@"NICK"] && prefix) {
+        /* services can rename the bot after registration; follow it or direct messages look like channel noise */
+        NSString *oldNick = [[prefix componentsSeparatedByString:@"!"] objectAtIndex:0];
+        NSString *newNick = trailing ?: ([parts count] > 1 ? [parts objectAtIndex:1] : nil);
+        if ([newNick length] && [oldNick caseInsensitiveCompare:_currentNick] == NSOrderedSame) {
+            [_currentNick release];
+            _currentNick = [newNick copy];
+        }
+    } else if ([command isEqualToString:@"PRIVMSG"] && [parts count] > 1 && prefix && trailing) {
+        [self _handlePrivmsg:trailing from:prefix target:[parts objectAtIndex:1]];
     }
 }
 
-- (void)_send:(NSString *)line {
-    NSString *full = [line stringByAppendingString:@"\r\n"];
-    NSData *d = [full dataUsingEncoding:NSUTF8StringEncoding];
-    [_output write:[d bytes] maxLength:[d length]];
+- (void)_handlePrivmsg:(NSString *)text from:(NSString *)prefix target:(NSString *)target {
+    if ([text hasPrefix:@"\x01"]) return;
+    NSRange bang = [prefix rangeOfString:@"!"];
+    NSString *nick = bang.location != NSNotFound ? [prefix substringToIndex:bang.location] : prefix;
+    BOOL direct = [target caseInsensitiveCompare:_currentNick] == NSOrderedSame;
+
+    if (!direct) {
+        BOOL addressed = NO;
+        for (NSString *sep in @[@":", @","]) {
+            NSString *lead = [_currentNick stringByAppendingString:sep];
+            if ([text length] >= [lead length] &&
+                [[text substringToIndex:[lead length]] caseInsensitiveCompare:lead] == NSOrderedSame) {
+                text = [text substringFromIndex:[lead length]];
+                addressed = YES;
+                break;
+            }
+        }
+        if (!addressed) return;
+    }
+    text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if ([text length] == 0) return;
+
+    OCChannelMessage *msg = [[[OCChannelMessage alloc] init] autorelease];
+    msg.channelId = [self channelId];
+    msg.chatId = direct ? nick : target;
+    msg.senderId = nick;
+    msg.senderAddress = prefix;
+    msg.senderName = nick;
+    msg.text = text;
+    msg.isGroup = !direct;
+    [_messageDelegate channel:self didReceiveMessage:msg];
 }
 
-- (void)sendMessage:(NSString *)text toChatId:(NSString *)chatId {
-    [self _send:[NSString stringWithFormat:@"PRIVMSG %@ :%@", chatId, text]];
+#pragma mark - Sending
+
+- (void)_sendNow:(NSString *)line {
+    /* a line break inside a parameter would let text inject a second irc command */
+    NSString *clean = [[line componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]] componentsJoinedByString:@" "];
+    [_conn sendData:[[clean stringByAppendingString:@"\r\n"] dataUsingEncoding:NSUTF8StringEncoding]];
 }
-- (void)sendMessage:(NSString *)text toChatId:(NSString *)chatId threadId:(NSString *)t {
-    [self sendMessage:text toChatId:chatId];
+
+- (void)sendMessage:(NSString *)text toChatId:(NSString *)chatId threadId:(NSString *)threadId {
+    if (!_registered || [chatId length] == 0 || [chatId rangeOfCharacterFromSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].location != NSNotFound) return;
+    NSUInteger count = 0;
+    for (NSString *raw in [OCStripMarkdown(text) componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if ([line length] == 0) continue;
+        for (NSString *part in OCSplitText(line, kIRCChunkChars)) {
+            if (count++ >= kIRCMaxReplyLines) {
+                [_outQueue addObject:[NSString stringWithFormat:@"PRIVMSG %@ :[reply cut short]", chatId]];
+                [self _pumpQueue];
+                return;
+            }
+            [_outQueue addObject:[NSString stringWithFormat:@"PRIVMSG %@ :%@", chatId, part]];
+        }
+    }
+    [self _pumpQueue];
 }
-- (void)sendReply:(NSString *)text toMessageId:(NSString *)mid chatId:(NSString *)chatId {
-    [self sendMessage:text toChatId:chatId];
+
+- (void)_pumpQueue {
+    if (_sendTimer || [_outQueue count] == 0) return;
+    [self _sendNext];
 }
+
+- (void)_sendNext {
+    _sendTimer = nil;
+    if ([_outQueue count] == 0 || !_conn) return;
+    [self _sendNow:[_outQueue objectAtIndex:0]];
+    [_outQueue removeObjectAtIndex:0];
+    if ([_outQueue count]) {
+        _sendTimer = [NSTimer scheduledTimerWithTimeInterval:kIRCLineInterval target:self
+                                                    selector:@selector(_sendNext) userInfo:nil repeats:NO];
+    }
+}
+
 - (NSDictionary *)statusInfo {
-    return @{@"server": _server ?: @"", @"registered": @(_registered)};
+    return @{@"server": _server ?: @"", @"nick": _currentNick ?: @"", @"lastError": _lastError ?: @""};
 }
+
 @end

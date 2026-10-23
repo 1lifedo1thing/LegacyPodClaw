@@ -7,6 +7,9 @@
  */
 
 #import "ExtendedTools.h"
+#import "ToolInputCheck.h"
+#import "Guardrails.h"
+#import "HTTPFetch.h"
 #import <UIKit/UIKit.h>
 #import <sys/sysctl.h>
 #import <sys/mount.h>
@@ -19,6 +22,7 @@
 #import <ifaddrs.h>
 #import <arpa/inet.h>
 #import <poll.h>
+#import <spawn.h>
 #import <fcntl.h>
 
 static OCStore *_memoryStore = nil;
@@ -47,38 +51,40 @@ static OCStore *_memoryStore = nil;
 
 /* every call is confirmed by the user through OCToolDispatcher, so there is no denylist */
 static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
-    /* build every c string before fork, because the child may only call async-signal-safe code */
     const char *ccmd = [cmd UTF8String];
     if (!ccmd) return @{@"output": @"command is not valid utf-8", @"exit": @(-1)};
-    char *cmdCopy = strdup(ccmd);
-    char *args[] = {(char *)"sh", (char *)"-c", cmdCopy, NULL};
-    char *env[] = {(char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin", (char *)"HOME=/var/mobile",
-                   (char *)"USER=mobile", (char *)"TERM=dumb", NULL};
-    rlim_t cpu = (rlim_t)timeout;
 
     int out[2];
-    if (pipe(out) != 0) { free(cmdCopy); return @{@"output": @"pipe failed", @"exit": @(-1)}; }
+    if (pipe(out) != 0) return @{@"output": @"pipe failed", @"exit": @(-1)};
+    fcntl(out[0], F_SETFD, FD_CLOEXEC);
+    fcntl(out[1], F_SETFD, FD_CLOEXEC);
 
-    pid_t pid = fork();
-    if (pid == 0) {
-        struct rlimit lim;
-        lim.rlim_cur = lim.rlim_max = cpu;
-        setrlimit(RLIMIT_CPU, &lim);
-        lim.rlim_cur = lim.rlim_max = 16 * 1024 * 1024;
-        setrlimit(RLIMIT_FSIZE, &lim);
-        dup2(out[1], STDOUT_FILENO);
-        dup2(out[1], STDERR_FILENO);
-        close(out[0]);
-        close(out[1]);
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
-        setpgid(0, 0);
-        execve("/bin/sh", args, env);
-        _exit(127);
-    }
-    free(cmdCopy);
+    /* cloexec-default closes every app descriptor (sockets, sqlite) in the child */
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&actions, out[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, out[1], STDERR_FILENO);
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&attr, 0);
+
+    /* limits are set by the shell, because posix_spawn cannot set rlimits */
+    char limits[96];
+    snprintf(limits, sizeof(limits), "ulimit -t %d 2>/dev/null; ulimit -f 32768 2>/dev/null; eval \"$1\"", (int)timeout);
+    char *args[] = {(char *)"sh", (char *)"-c", limits, (char *)"sh", (char *)ccmd, NULL};
+    char *env[] = {(char *)"PATH=/usr/bin:/bin:/usr/sbin:/sbin", (char *)"HOME=/var/mobile",
+                   (char *)"USER=mobile", (char *)"TERM=dumb", NULL};
+    pid_t pid = -1;
+    int spawnErr = posix_spawn(&pid, "/bin/sh", &actions, &attr, args, env);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
     close(out[1]);
-    if (pid < 0) { close(out[0]); return @{@"output": @"fork failed", @"exit": @(-1)}; }
+    if (spawnErr != 0) {
+        close(out[0]);
+        return @{@"output": [NSString stringWithFormat:@"could not start /bin/sh: %s", strerror(spawnErr)], @"exit": @(-1)};
+    }
 
     NSMutableData *data = [NSMutableData data];
     BOOL truncated = NO, timedOut = NO;
@@ -94,17 +100,27 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         ssize_t n = read(out[0], buf, sizeof(buf));
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
-        if ([data length] < BASH_OUTPUT_MAX)
-            [data appendBytes:buf length:MIN((NSUInteger)n, BASH_OUTPUT_MAX - [data length])];
-        else truncated = YES;
+        NSUInteger room = BASH_OUTPUT_MAX - [data length];
+        if ((NSUInteger)n > room) truncated = YES;
+        if (room > 0) [data appendBytes:buf length:MIN((NSUInteger)n, room)];
     }
     close(out[0]);
 
-    /* the command ran in its own process group, so this also stops its children */
-    if (timedOut) { kill(-pid, SIGTERM); usleep(200000); kill(-pid, SIGKILL); }
+    /* the shell may close its output and keep running, so wait with the same deadline */
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    pid_t done = 0;
+    while (!timedOut && (done = waitpid(pid, &status, WNOHANG)) == 0) {
+        if ([deadline timeIntervalSinceNow] <= 0) { timedOut = YES; break; }
+        usleep(50000);
+    }
+    if (timedOut || done < 0) {
+        kill(-pid, SIGTERM);
+        usleep(200000);
+        kill(-pid, SIGKILL);
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
 
+    if (truncated) [data setLength:OCUtf8SafeLength([data bytes], [data length])];
     NSString *output = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]
         ?: [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
     if (truncated) output = [output stringByAppendingString:@"\n[output truncated]"];
@@ -176,6 +192,13 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSString *path = [p objectForKey:@"path"];
         NSString *content = [p objectForKey:@"content"];
+        NSUInteger bytes = [content lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        if (bytes > [[OCGuardrails shared] maxFileWriteSize]) {
+            cb(nil, [NSError errorWithDomain:@"OCTools" code:1 userInfo:@{NSLocalizedDescriptionKey:
+                [NSString stringWithFormat:@"content is %lu bytes; the limit is %lu", (unsigned long)bytes,
+                 (unsigned long)[[OCGuardrails shared] maxFileWriteSize]]}]);
+            return;
+        }
         NSError *e = nil;
         [content writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&e];
         cb(e ? [e localizedDescription] : [NSString stringWithFormat:@"Written %lu bytes to %@",
@@ -263,13 +286,12 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         @"required": @[@"query"]};
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSString *q = [p objectForKey:@"query"];
-        NSString *encoded = [q stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        /* escape & = + too, or the query could add its own parameters */
+        NSString *encoded = [(NSString *)CFURLCreateStringByAddingPercentEscapes(NULL, (CFStringRef)q, NULL,
+            CFSTR("!*'();:@&=+$,/?#[]"), kCFStringEncodingUTF8) autorelease];
         NSString *url = [NSString stringWithFormat:
             @"https://html.duckduckgo.com/html/?q=%@", encoded];
-        NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:url]
-            cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:15];
-        [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-            completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
+        CPFetch(url, @"GET", nil, nil, 15, ^(NSData *d, NSInteger status, NSError *e) {
             if (e) { cb(nil, e); return; }
             NSString *html = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] autorelease];
             /* Extract result snippets - simple parsing */
@@ -297,7 +319,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
             }
             cb([results count] > 0 ? [results componentsJoinedByString:@"\n\n"]
                                     : @"No results found", nil);
-        }];
+        });
     };
     return t;
 }

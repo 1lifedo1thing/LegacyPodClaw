@@ -27,6 +27,8 @@
     </array>
     <key>UIPrerenderedIcon</key>
     <true/>
+    <key>NSRemindersUsageDescription</key>
+    <string>LegacyPodClaw creates, lists and completes reminders when you ask it to.</string>
     <key>SBUsesNetwork</key>
     <true/>
     <key>LSRequiresIPhoneOS</key>

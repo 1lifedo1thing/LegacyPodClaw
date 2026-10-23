@@ -1,16 +1,10 @@
-/*
- * OCPluginSDK.h
- * LegacyPodClaw - Plugin System
- *
- * Loadable .bundle plugins that can add tools, channels, and providers.
- * Each plugin is an ObjC bundle with a principal class conforming to OCPlugin.
- */
+/* loadable plugins; only root-owned bundles load, so only a package installed as root can add code */
 
 #import <Foundation/Foundation.h>
 #import "Agent.h"
 #import "ChannelManager.h"
 
-#pragma mark - Plugin Protocol
+extern NSString *const OCPluginDirectory;
 
 @protocol OCPlugin <NSObject>
 @required
@@ -22,39 +16,26 @@
 - (void)deactivate;
 
 @optional
-/* Return tools this plugin provides */
+/* tool definitions or dictionaries with name, description, inputSchema and handler; see the readme */
 - (NSArray *)providedTools;
-/* Return channel instances this plugin provides */
+/* objects that conform to OCChannel */
 - (NSArray *)providedChannels;
-/* Called when plugin config changes */
 - (void)configDidChange:(NSDictionary *)config;
 @end
-
-#pragma mark - Plugin Manager
 
 @interface OCPluginManager : NSObject
 
 @property (nonatomic, readonly) NSArray *loadedPlugins;
 
-/* Load all plugins from a directory */
+/* refuses the whole directory unless it is root-owned and not group or world writable */
 - (void)loadPluginsFromDirectory:(NSString *)directory;
-
-/* Load a single plugin bundle */
 - (BOOL)loadPluginAtPath:(NSString *)bundlePath error:(NSError **)error;
-
-/* Unload a plugin */
 - (void)unloadPlugin:(NSString *)pluginId;
 
-/* Get all tools from all plugins */
+/* copies of every plugin tool with confirmation forced on */
 - (NSArray *)allPluginTools;
-
-/* Get all channels from all plugins */
 - (NSArray *)allPluginChannels;
 
-/* Register a plugin programmatically (not from bundle) */
-- (void)registerPlugin:(id<OCPlugin>)plugin;
-
-/* Plugin config (passed to plugins on activate) */
 - (void)setConfig:(NSDictionary *)config forPlugin:(NSString *)pluginId;
 
 @end

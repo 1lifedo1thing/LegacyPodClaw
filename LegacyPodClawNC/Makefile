@@ -1,3 +1,6 @@
+ARCHS = armv7
+TARGET = iphone:clang:14.5:6.0
+
 include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = LegacyPodClawNC

@@ -186,16 +186,6 @@
         }
     }
     
-    /* Migrate daemon token */
-    NSString *daemonToken = [prefs objectForKey:@"daemonAuthToken"];
-    if (daemonToken && [daemonToken length] > 0) {
-        NSError *err = nil;
-        if (![self setToken:daemonToken forKey:@"daemon_auth_token" error:&err]) {
-            [failures addObject:@"daemonAuthToken"];
-            success = NO;
-        }
-    }
-    
     /* Migrate device token */
     NSString *deviceToken = [prefs objectForKey:@"deviceToken"];
     if (deviceToken && [deviceToken length] > 0) {

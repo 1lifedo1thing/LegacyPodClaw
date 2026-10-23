@@ -71,14 +71,26 @@ static const NSUInteger kMaxInboundChars = 4000;
     [_allowed setObject:[NSSet setWithArray:senders ?: @[]] forKey:channelId];
 }
 
+/* stop the run now; waiting for the session's dealloc would let a reply through while anything still retains it */
+static void StopSession(_OCChannelSession *session) {
+    session.agent.delegate = nil;
+    [session.agent abort];
+    session.agent = nil;
+    session.origin = nil;
+    [session.queue removeAllObjects];
+}
+
 - (void)reset {
+    for (_OCChannelSession *s in [_sessions allValues]) StopSession(s);
     [_sessions removeAllObjects];
 }
 
 - (void)resetChannel:(NSString *)channelId {
     NSString *prefix = [channelId stringByAppendingString:@":"];
     for (NSString *key in [_sessions allKeys]) {
-        if ([key hasPrefix:prefix]) [_sessions removeObjectForKey:key];
+        if (![key hasPrefix:prefix]) continue;
+        StopSession([_sessions objectForKey:key]);
+        [_sessions removeObjectForKey:key];
     }
 }
 

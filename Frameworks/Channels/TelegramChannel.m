@@ -120,6 +120,8 @@ static NSString *TelegramErrorText(NSInteger status, id json) {
                 return;
             }
             _backoff = MIN(MAX(_backoff * 2, 5.0), 120.0);
+            /* a quick first poll shows the link as connected again without a full long poll wait */
+            _quickPoll = YES;
             [self _pollAfter:_backoff];
             return;
         }

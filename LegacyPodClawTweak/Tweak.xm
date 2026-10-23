@@ -889,8 +889,9 @@ static NSString *const kCPWidgetSectionID = @"pro.matthesketh.legacypodclaw.nc-w
 /*
  * Add LegacyPodClaw status below the date on the lock screen.
  * SBAwayView has ivar _dateHeaderView (SBAwayDateView).
- * Hook viewDidLayoutSubviews safely - avoid layoutSubviews
- * which fires too frequently and can cause recursion.
+ * The date view sits in a TPLCDView at y 20, so its own frame is
+ * 20 pt too high. layoutSubviews only moves the label when its frame
+ * changes, so it does not cause a new layout pass.
  */
 
 @interface SBAwayView : UIView
@@ -904,12 +905,41 @@ static void CPUpdateLockLabel(void) {
     NSString *host = [prefs objectForKey:@"gatewayHost"];
     BOOL hasKey = CPAgentConfigured(prefs);
 
+    /* the label shows on the lock screen and the passcode keypad, so never show the host */
     if (host && [host length] > 0)
-        _lsLabel.text = [NSString stringWithFormat:@"LegacyPodClaw - %@", host];
+        _lsLabel.text = @"LegacyPodClaw - Connected";
     else if (hasKey)
         _lsLabel.text = @"LegacyPodClaw - Ready";
     else
         _lsLabel.text = @"LegacyPodClaw";
+}
+
+/* the bottom of the date bar on a 320 pt wide lock screen, for when the date view is not usable */
+static const CGFloat kCPLockLabelFallbackTop = 116;
+
+static CGFloat CPLockLabelTop(UIView *away) {
+    UIView *dateHeader = nil;
+    @try { dateHeader = [away valueForKey:@"_dateHeaderView"]; } @catch (NSException *e) {}
+    if (![dateHeader isKindOfClass:[UIView class]] || dateHeader.hidden) return kCPLockLabelFallbackTop;
+
+    /* add up the frames by hand; convertRect: gave window coordinates before the view was in place */
+    CGFloat bottom = CGRectGetMaxY(dateHeader.frame);
+    UIView *v = dateHeader.superview;
+    while (v && v != away) {
+        bottom += v.frame.origin.y - v.bounds.origin.y;
+        v = v.superview;
+    }
+    if (v != away) return kCPLockLabelFallbackTop;
+
+    /* a value outside the top third means the layout is not done yet */
+    if (bottom < 60 || bottom > away.bounds.size.height / 3) return kCPLockLabelFallbackTop;
+    return bottom;
+}
+
+static void CPPlaceLockLabel(UIView *away) {
+    if (!_lsLabel || _lsLabel.superview != away) return;
+    CGRect want = CGRectMake(10, CPLockLabelTop(away) + 2, away.bounds.size.width - 20, 18);
+    if (!CGRectEqualToRect(_lsLabel.frame, want)) _lsLabel.frame = want;
 }
 
 %hook SBAwayView
@@ -919,7 +949,7 @@ static void CPUpdateLockLabel(void) {
 
     if (!_lsLabel && self.window) {
         CGFloat w = self.bounds.size.width;
-        _lsLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 96, w - 20, 18)];
+        _lsLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, kCPLockLabelFallbackTop + 2, w - 20, 18)];
         _lsLabel.font = [UIFont systemFontOfSize:11];
         _lsLabel.textColor = [UIColor colorWithWhite:1 alpha:0.55f];
         _lsLabel.textAlignment = NSTextAlignmentCenter;
@@ -932,17 +962,14 @@ static void CPUpdateLockLabel(void) {
     if (_lsLabel && self.window && _lsLabel.superview != self)
         [self addSubview:_lsLabel];
 
-    /* Position below date header if available */
-    @try {
-        UIView *dateHeader = [self valueForKey:@"_dateHeaderView"];
-        if (dateHeader && _lsLabel.superview == self) {
-            CGRect df = dateHeader.frame;
-            _lsLabel.frame = CGRectMake(10, CGRectGetMaxY(df) + 2,
-                                         self.bounds.size.width - 20, 18);
-        }
-    } @catch (NSException *e) {}
-
+    CPPlaceLockLabel(self);
     CPUpdateLockLabel();
+}
+
+/* the date view gets its final frame only in layout, after didMoveToWindow */
+- (void)layoutSubviews {
+    %orig;
+    CPPlaceLockLabel(self);
 }
 
 %end
@@ -1027,21 +1054,24 @@ static void CPUnlockAndShow(id away) {
     @try {
         UIView *grabber = [self valueForKey:@"_cameraGrabber"];
         if (grabber) {
-            /* Hide original camera icon */
+            /* with a passcode the grabber opens apple's camera, so it must show apple's icon */
+            BOOL ours = !CPDeviceHasPasscode();
             for (UIView *sub in [grabber subviews]) {
-                if ([sub isKindOfClass:[UIImageView class]]) sub.hidden = YES;
+                if ([sub isKindOfClass:[UIImageView class]] && sub.tag != 8888) sub.hidden = ours;
             }
 
-            /* Add Molty mascot icon if not already there */
-            if (![grabber viewWithTag:8888]) {
-                UIImage *molty = [UIImage imageWithContentsOfFile:@"/Applications/LegacyPodClaw.app/Icon.png"];
+            UIView *molty = [grabber viewWithTag:8888];
+            if (!ours) {
+                [molty removeFromSuperview];
+            } else if (!molty) {
+                UIImage *img = [UIImage imageWithContentsOfFile:@"/Applications/LegacyPodClaw.app/Icon.png"];
                 CGFloat size = MIN(grabber.bounds.size.width, grabber.bounds.size.height);
                 if (size < 10) size = 30;
                 UIImageView *iconView = [[[UIImageView alloc] initWithFrame:
                     CGRectMake((grabber.bounds.size.width - size) / 2,
                                (grabber.bounds.size.height - size) / 2 - 2,
                                size, size)] autorelease];
-                iconView.image = molty;
+                iconView.image = img;
                 iconView.contentMode = UIViewContentModeScaleAspectFit;
                 iconView.tag = 8888;
                 [grabber addSubview:iconView];
@@ -1604,6 +1634,8 @@ static NSString *const kCPImageDir = @"/Library/Application Support/LegacyPodCla
     });
     /* this runs for every image springboard loads, so reject most names cheaply */
     if (![name isKindOfClass:[NSString class]] || ![name rangeOfString:@"Camera"].length) return %orig;
+    /* with a passcode the camera is apple's, so keep apple's grabber and camera art */
+    if (CPDeviceHasPasscode()) return %orig;
     NSString *base = [[name stringByDeletingPathExtension] stringByReplacingOccurrencesOfString:@"~iphone" withString:@""];
     base = [base stringByReplacingOccurrencesOfString:@"@2x" withString:@""];
     if ([names containsObject:base]) {

@@ -35,6 +35,16 @@ make package
 
 This produces: `.theos/obj/debug/LegacyPodClaw.app` and a `.deb` package.
 
+## Test
+
+The host tests run on macOS with the system SDK, under AddressSanitizer and UBSan:
+
+```bash
+make test
+```
+
+They cover the HTTP response parser, the file guardrails and the tool input checks. They do not need a device or Theos.
+
 ## Install
 
 ### Via SSH (device must be on same network)

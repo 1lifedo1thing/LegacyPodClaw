@@ -7,6 +7,7 @@
  */
 
 #import "ExtendedTools.h"
+#import "ToolInputCheck.h"
 #import <UIKit/UIKit.h>
 #import <sys/sysctl.h>
 #import <sys/mount.h>
@@ -45,17 +46,6 @@ static OCStore *_memoryStore = nil;
 #pragma mark - Bash
 
 #define BASH_OUTPUT_MAX 16384
-
-/* cut at a character boundary, so a split multi-byte sequence does not garble the whole output */
-static NSUInteger Utf8SafeLength(const uint8_t *bytes, NSUInteger length) {
-    NSUInteger i = length;
-    NSUInteger back = 0;
-    while (i > 0 && back < 4 && (bytes[i - 1] & 0xC0) == 0x80) { i--; back++; }
-    if (i == 0) return length;
-    uint8_t lead = bytes[i - 1];
-    NSUInteger need = (lead & 0x80) == 0 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
-    return (back + 1 >= need) ? length : i - 1;
-}
 
 /* every call is confirmed by the user through OCToolDispatcher, so there is no denylist */
 static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
@@ -128,7 +118,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     }
 
-    if (truncated) [data setLength:Utf8SafeLength([data bytes], [data length])];
+    if (truncated) [data setLength:OCUtf8SafeLength([data bytes], [data length])];
     NSString *output = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]
         ?: [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
     if (truncated) output = [output stringByAppendingString:@"\n[output truncated]"];

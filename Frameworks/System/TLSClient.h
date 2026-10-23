@@ -7,6 +7,18 @@
 
 extern NSString *const CPTLSErrorDomain;
 
+enum {
+    CPTLSErrorSetup = -1,
+    CPTLSErrorDNS = -2,
+    CPTLSErrorConnect = -3,
+    CPTLSErrorHandshake = -4,
+    CPTLSErrorPinning = -5,
+    CPTLSErrorIO = -6,
+    CPTLSErrorProtocol = -7,
+    CPTLSErrorTooLarge = -8,
+    CPTLSErrorBadRequest = -9,
+};
+
 typedef void(^CPHTTPSCompletion)(NSData *data, NSInteger statusCode, NSError *error);
 typedef void(^CPHTTPSStreamChunk)(NSData *chunk);
 

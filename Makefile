@@ -45,12 +45,14 @@ LegacyPodClaw_FILES = \
 	Frameworks/Tools/SystemMCP.m \
 	Frameworks/Tools/Guardrails.m \
 	Frameworks/Tools/ToolDispatcher.m \
+	Frameworks/Tools/ToolInputCheck.m \
 	Frameworks/Tools/SkillRegistry.m \
 	Frameworks/Tools/NotesReminders.m \
 	Frameworks/Tools/NotesDatabase.m \
 	Frameworks/Tools/MusicDownloader.m \
 	Frameworks/System/System.m \
 	Frameworks/System/TLSClient.m \
+	Frameworks/System/HTTPResponseParser.m \
 	Frameworks/System/SecretStore.m
 
 LegacyPodClaw_CFLAGS = \
@@ -100,3 +102,8 @@ include $(THEOS_MAKE_PATH)/application.mk
 
 SUBPROJECTS += LegacyPodClawPrefs LegacyPodClawTweak LegacyPodClawNC LegacyPodClawDaemon
 include $(THEOS_MAKE_PATH)/aggregate.mk
+
+# host tests run on macOS with the system sdk, not on the device
+test:
+	$(MAKE) -C Tests test
+.PHONY: test

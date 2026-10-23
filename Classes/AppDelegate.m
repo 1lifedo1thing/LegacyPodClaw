@@ -13,9 +13,27 @@
 #import "SystemMCP.h"
 #import "NotesReminders.h"
 #import "MusicDownloader.h"
+#import "ProviderRegistry.h"
+#import "TelegramChannel.h"
+#import "DiscordChannel.h"
+#import "SlackChannel.h"
+#import "IRCChannel.h"
+#import "WebhookChannel.h"
 #import <notify.h>
 
+static NSString *const LPCPrefsPath = @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist";
+
+@interface AppDelegate () {
+    OCChannelRouter *_channelRouter;
+    NSDictionary *_channelSettings;
+}
+- (void)_reloadChannels:(NSDictionary *)prefs;
+- (void)_autoStart;
+@end
+
 @implementation AppDelegate
+
+@synthesize channelManager = _channelManager, pluginManager = _pluginManager;
 
 static AppDelegate *_shared = nil;
 
@@ -96,7 +114,7 @@ static AppDelegate *_shared = nil;
         @"- Download songs and add to the Music library (download_music tool, requires music proxy)\n"
         @"- List songs in the music library (list_music tool)\n\n"
         @"ALWAYS use tools when the user asks you to do something on the device. "
-        @"Don't say you can't — you CAN. You have root access.\n\n"
+        @"Don't say you can't — you CAN. You run as the mobile user, not root.\n\n"
         @"Safety: /System, /sbin, /bin, /boot are protected. Check disk space before large writes. "
         @"Destructive commands need confirmation.\n\n"
         @"Be concise but thorough. Show command output when relevant.";
@@ -119,6 +137,11 @@ static AppDelegate *_shared = nil;
         }
     }
     NSLog(@"[LegacyPodClaw] %lu tools registered", (unsigned long)[seen count]);
+
+    /* plugin tools come last, so a plugin can never replace a built-in tool */
+    _pluginManager = [[OCPluginManager alloc] init];
+    [_pluginManager loadPluginsFromDirectory:OCPluginDirectory];
+    for (OCToolDefinition *tool in [_pluginManager allPluginTools]) [_localAgent registerTool:tool];
 
     [OCExtendedTools setupMemoryTables:_store];
 
@@ -146,6 +169,13 @@ static AppDelegate *_shared = nil;
     /* Auto-connect if we have saved settings */
     if (_gateway.host && [_gateway.host length] > 0) {
         [self connectToGateway];
+    }
+
+    /* the server switch is remembered, so a relaunch brings the server back */
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:LPCPrefsPath];
+    if ([[prefs objectForKey:@"gatewayServerEnabled"] boolValue]) {
+        NSError *err = nil;
+        if (![self startGatewayServer:&err]) NSLog(@"[LegacyPodClaw] gateway server did not start: %@", err);
     }
 
     return YES;
@@ -195,6 +225,7 @@ static AppDelegate *_shared = nil;
             NSLog(@"[LegacyPodClaw] Memory pressure: TERMINAL - shedding everything");
             [_sessionManager trimMessageWindows];
             [_localAgent clearContext];
+            [_channelRouter reset];
             [_store vacuum];
             [[NSURLCache sharedURLCache] removeAllCachedResponses];
             break;
@@ -225,8 +256,7 @@ static AppDelegate *_shared = nil;
 
 - (void)loadConnectionSettings {
     /* Read from shared preferences file (written by Settings.app PreferenceBundle) */
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:
-        @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"];
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:LPCPrefsPath];
 
     _gateway.host = [prefs objectForKey:@"gatewayHost"];
     NSString *portStr = [prefs objectForKey:@"gatewayPort"];
@@ -242,17 +272,25 @@ static AppDelegate *_shared = nil;
     _gateway.authConfig = auth;
     [auth release];
 
-    /* Local agent config */
+    /* Local agent config: the provider chosen in Settings, with its own key and base url */
+    OCProviderInfo *provider = [OCProviderInfo providerWithId:[prefs objectForKey:@"modelProvider"]]
+                            ?: [OCProviderInfo providerWithId:[OCProviderInfo defaultProviderId]];
     OCModelConfig *modelCfg = [[OCModelConfig alloc] init];
-    modelCfg.apiKey = [CPSecretStore secretForKey:@"apiKey"];
-    modelCfg.modelId = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514";
-    modelCfg.baseURL = [prefs objectForKey:@"customBaseURL"];
+    modelCfg.providerId = provider.providerId;
+    modelCfg.apiKey = provider.secretKey ? [CPSecretStore secretForKey:provider.secretKey] : nil;
+    NSString *modelId = [prefs objectForKey:@"modelId"];
+    modelCfg.modelId = [modelId length] ? modelId : provider.defaultModel;
+    modelCfg.baseURL = [prefs objectForKey:provider.baseURLPrefKey];
     modelCfg.maxTokens = [[prefs objectForKey:@"maxResponseTokens"] intValue] ?: 512;
     modelCfg.contextWindow = [[prefs objectForKey:@"maxContextTokens"] intValue] ?: 2048;
     _localAgent.modelConfig = modelCfg;
+    _localAgent.maxContextTokens = modelCfg.contextWindow;
     [modelCfg release];
 
     /* MCP servers */
+    /* a reload must not stack a second client for the same server */
+    [_localAgent removeMCPServer:@"MCP1"];
+    [_localAgent removeMCPServer:@"MCP2"];
     NSString *mcp1 = [prefs objectForKey:@"mcpServer1"];
     if (mcp1 && [mcp1 length] > 0) {
         OCMCPClient *client = [[[OCMCPClient alloc] initWithURL:mcp1 name:@"MCP1"] autorelease];
@@ -265,6 +303,8 @@ static AppDelegate *_shared = nil;
         [_localAgent addMCPServer:client];
         [client connect:nil];
     }
+
+    [self _reloadChannels:prefs];
 }
 
 - (void)_registerPrefsNotifications {
@@ -283,7 +323,143 @@ static AppDelegate *_shared = nil;
         dispatch_get_main_queue(), ^(int t) {
             [self disconnectFromGateway];
         });
+    /* the tweak posts this after springboard boots; it acts only if the user turned auto-start on */
+    notify_register_dispatch("pro.matthesketh.legacypodclaw/autoStart", &token,
+        dispatch_get_main_queue(), ^(int t) {
+            [self _autoStart];
+        });
 }
+
+#pragma mark - Gateway Server
+
+- (BOOL)startGatewayServer:(NSError **)error {
+    if (_gatewayServer.isRunning) return YES;
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:LPCPrefsPath];
+    OCModelConfig *mc = _localAgent.modelConfig;
+    OCGatewayConfig *cfg = [[[OCGatewayConfig alloc] init] autorelease];
+    NSString *portStr = [prefs objectForKey:@"serverPort"];
+    cfg.port = [portStr intValue] > 0 ? (uint16_t)[portStr intValue] : 18789;
+    cfg.defaultProviderId = mc.providerId;
+    cfg.defaultModelId = mc.modelId;
+    cfg.defaultApiKey = mc.apiKey;
+    cfg.defaultBaseURL = mc.baseURL;
+
+    OCGatewayServer *server = [[[OCGatewayServer alloc] initWithConfig:cfg] autorelease];
+    OCChannelManager *channels = _channelManager;
+    server.webhookHandler = ^NSString *(NSDictionary *payload) {
+        id<OCChannel> ch = [channels channelForId:@"webhook"];
+        if (![(id)ch isKindOfClass:[OCWebhookChannel class]]) return @"The webhook channel is not enabled";
+        return [(OCWebhookChannel *)ch handleInboundPayload:payload];
+    };
+    if (![server start:error]) return NO;
+    self.gatewayServer = server;
+    return YES;
+}
+
+- (void)stopGatewayServer {
+    [_gatewayServer stop];
+    self.gatewayServer = nil;
+}
+
+#pragma mark - Channels
+
+static BOOL PrefOn(NSDictionary *prefs, NSString *key) { return [[prefs objectForKey:key] boolValue]; }
+static NSString *PrefString(NSDictionary *prefs, NSString *key) {
+    id v = [prefs objectForKey:key];
+    if ([v isKindOfClass:[NSNumber class]]) v = [v description];
+    return [v isKindOfClass:[NSString class]] ? [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : nil;
+}
+
+/* everything a channel is built from; a restart happens only when this changes */
+- (NSDictionary *)_channelSettings:(NSDictionary *)prefs {
+    NSMutableDictionary *cfg = [NSMutableDictionary dictionary];
+    for (NSString *key in @[@"telegramEnabled", @"discordEnabled", @"slackEnabled", @"ircEnabled", @"webhookEnabled",
+                            @"ircServer", @"ircPort", @"ircTLS", @"ircNick", @"ircChannels", @"webhookCallbackURL"]) {
+        id v = [prefs objectForKey:key];
+        if (v) [cfg setObject:v forKey:key];
+    }
+    NSArray *secrets = @[];
+    if (PrefOn(prefs, @"telegramEnabled")) secrets = [secrets arrayByAddingObject:@"telegramBotToken"];
+    if (PrefOn(prefs, @"discordEnabled")) secrets = [secrets arrayByAddingObject:@"discordBotToken"];
+    if (PrefOn(prefs, @"slackEnabled")) secrets = [secrets arrayByAddingObjectsFromArray:@[@"slackAppToken", @"slackBotToken"]];
+    if (PrefOn(prefs, @"ircEnabled")) secrets = [secrets arrayByAddingObject:@"ircPassword"];
+    if (PrefOn(prefs, @"webhookEnabled")) secrets = [secrets arrayByAddingObject:@"webhookCallbackToken"];
+    for (NSString *key in secrets) {
+        NSString *v = [CPSecretStore secretForKey:key];
+        if (v) [cfg setObject:v forKey:key];
+    }
+    return cfg;
+}
+
+- (void)_reloadChannels:(NSDictionary *)prefs {
+    if (!_channelManager) {
+        _channelManager = [[OCChannelManager alloc] init];
+        _channelRouter = [[OCChannelRouter alloc] init];
+        _channelRouter.manager = _channelManager;
+        _channelRouter.toolSource = _localAgent;
+    }
+
+    _channelRouter.modelConfig = _localAgent.modelConfig;
+    _channelRouter.systemPrompt = _localAgent.systemPrompt;
+    _channelRouter.maxContextTokens = MIN(_localAgent.modelConfig.contextWindow ?: 2048, (NSUInteger)4096);
+    _channelRouter.toolsEnabled = PrefOn(prefs, @"channelToolsEnabled");
+
+    NSDictionary *cfg = [self _channelSettings:prefs];
+    NSMutableArray *ids = [NSMutableArray arrayWithObjects:@"telegram", @"discord", @"slack", @"irc", @"webhook", nil];
+    for (id<OCChannel> ch in [_pluginManager allPluginChannels]) [ids addObject:[ch channelId]];
+    for (NSString *cid in ids) {
+        [_channelRouter setAllowedSenders:OCListFromString(PrefString(prefs, [cid stringByAppendingString:@"AllowedIds"]))
+                               forChannel:cid];
+    }
+
+    if (_channelSettings && [_channelSettings isEqualToDictionary:cfg]) return;
+    [_channelSettings release];
+    _channelSettings = [cfg retain];
+
+    [_channelManager removeAllChannels];
+    [_channelRouter reset];
+
+    NSString *tg = [cfg objectForKey:@"telegramBotToken"];
+    if (PrefOn(prefs, @"telegramEnabled") && [tg length])
+        [_channelManager registerChannel:[[[OCTelegramChannel alloc] initWithBotToken:tg] autorelease]];
+    NSString *dc = [cfg objectForKey:@"discordBotToken"];
+    if (PrefOn(prefs, @"discordEnabled") && [dc length])
+        [_channelManager registerChannel:[[[OCDiscordChannel alloc] initWithBotToken:dc] autorelease]];
+    NSString *slackApp = [cfg objectForKey:@"slackAppToken"], *slackBot = [cfg objectForKey:@"slackBotToken"];
+    if (PrefOn(prefs, @"slackEnabled") && [slackApp length] && [slackBot length])
+        [_channelManager registerChannel:[[[OCSlackChannel alloc] initWithAppToken:slackApp botToken:slackBot] autorelease]];
+    NSString *server = PrefString(prefs, @"ircServer"), *nick = PrefString(prefs, @"ircNick");
+    if (PrefOn(prefs, @"ircEnabled") && [server length] && [nick length]) {
+        OCIRCChannel *irc = [[[OCIRCChannel alloc] initWithServer:server port:[PrefString(prefs, @"ircPort") intValue]
+                                                           useTLS:PrefOn(prefs, @"ircTLS") nickname:nick] autorelease];
+        irc.password = [cfg objectForKey:@"ircPassword"];
+        irc.channels = OCListFromString(PrefString(prefs, @"ircChannels"));
+        [_channelManager registerChannel:irc];
+    }
+    NSString *callback = PrefString(prefs, @"webhookCallbackURL");
+    if (PrefOn(prefs, @"webhookEnabled") && [callback length]) {
+        [_channelManager registerChannel:[[[OCWebhookChannel alloc] initWithCallbackURL:callback
+                                                                            bearerToken:[cfg objectForKey:@"webhookCallbackToken"]] autorelease]];
+    }
+    for (id<OCChannel> ch in [_pluginManager allPluginChannels]) {
+        if (![_channelManager registerChannel:ch]) NSLog(@"[LegacyPodClaw] plugin channel %@ clashes with another channel", [ch channelId]);
+    }
+    [_channelManager startAll];
+    NSLog(@"[LegacyPodClaw] %lu channels configured", (unsigned long)[[_channelManager channels] count]);
+}
+
+- (void)_autoStart {
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:LPCPrefsPath];
+    if (!PrefOn(prefs, @"autoStartOnBoot")) return;
+    NSLog(@"[LegacyPodClaw] auto-start requested");
+    [self _reloadChannels:prefs];
+    [_channelManager startAll];
+    if (PrefOn(prefs, @"gatewayServerEnabled")) {
+        NSError *err = nil;
+        if (![self startGatewayServer:&err]) NSLog(@"[LegacyPodClaw] gateway server did not start: %@", err);
+    }
+}
+
 
 #pragma mark - OCGatewayClientDelegate
 
@@ -336,6 +512,8 @@ static AppDelegate *_shared = nil;
     [_window release]; [_rootViewController release];
     [_gateway release]; [_store release]; [_sessionManager release];
     [_settings release]; [_localAgent release];
+    [_channelRouter release]; [_channelManager release]; [_channelSettings release];
+    [_pluginManager release]; [_gatewayServer release];
     [super dealloc];
 }
 

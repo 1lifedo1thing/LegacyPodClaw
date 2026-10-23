@@ -1,123 +1,73 @@
-/*
- * OCProviderRegistry.h
- * LegacyPodClaw - Multi-Provider AI Model Registry
- *
- * Supports: Anthropic, OpenAI, Google/Gemini, Ollama, Groq,
- * Together AI, OpenRouter, Mistral, Deepseek, and custom endpoints.
- * Handles failover, rotation, and model catalog.
- */
+/* model providers: anthropic messages plus one openai-compatible chat adapter */
 
 #import <Foundation/Foundation.h>
 
-#pragma mark - Provider Protocol
+extern NSString *const OCProviderErrorDomain;
+extern NSString *const OCDefaultModelId;
 
-typedef void(^OCProviderStreamBlock)(NSDictionary *chunk);
-typedef void(^OCProviderCompletionBlock)(NSDictionary *response, NSError *error);
+typedef NS_ENUM(NSUInteger, OCProviderFormat) {
+    OCProviderFormatAnthropic = 0,
+    OCProviderFormatOpenAI,
+};
 
-@protocol OCModelProvider <NSObject>
-@required
-@property (nonatomic, readonly) NSString *providerId;
-@property (nonatomic, readonly) NSString *displayName;
-@property (nonatomic, copy) NSString *apiKey;
-@property (nonatomic, copy) NSString *baseURL;
-@property (nonatomic, readonly) BOOL isConfigured;
+@interface OCProviderInfo : NSObject
+@property (nonatomic, readonly, copy) NSString *providerId;
+@property (nonatomic, readonly, copy) NSString *displayName;
+@property (nonatomic, readonly) OCProviderFormat format;
+@property (nonatomic, readonly, copy) NSString *defaultBaseURL;
+/* key name in the secret store, nil when the provider takes no key */
+@property (nonatomic, readonly, copy) NSString *secretKey;
+@property (nonatomic, readonly) BOOL requiresKey;
+@property (nonatomic, readonly, copy) NSString *defaultModel;
+@property (nonatomic, readonly, copy) NSString *modelHint;
+@property (nonatomic, readonly, retain) NSArray *suggestedModels;
+/* preferences plist key that overrides the base url */
+@property (nonatomic, readonly, copy) NSString *baseURLPrefKey;
 
-- (void)chatCompletion:(NSDictionary *)request
-              onChunk:(OCProviderStreamBlock)onChunk
-           completion:(OCProviderCompletionBlock)completion;
++ (NSArray *)allProviders;
++ (OCProviderInfo *)providerWithId:(NSString *)providerId;
++ (NSString *)defaultProviderId;
++ (NSArray *)allSecretKeys;
+@end
 
+@interface OCProviderToolCall : NSObject
+@property (nonatomic, copy) NSString *callId;
+@property (nonatomic, copy) NSString *name;
+/* nil when the model sent arguments that are not a json object */
+@property (nonatomic, copy) NSDictionary *input;
+@end
+
+@interface OCProviderResult : NSObject
+@property (nonatomic, copy) NSString *text;
+@property (nonatomic, retain) NSArray *toolCalls;
+/* end_turn, tool_use, max_tokens, refusal, stop, length, tool_calls */
+@property (nonatomic, copy) NSString *stopReason;
+/* anthropic content blocks, sent back unchanged so thinking blocks stay valid */
+@property (nonatomic, retain) NSArray *rawContent;
+@property (nonatomic, assign) NSUInteger inputTokens;
+@property (nonatomic, assign) NSUInteger outputTokens;
+@end
+
+typedef void(^OCProviderTextBlock)(NSString *delta);
+typedef void(^OCProviderDoneBlock)(OCProviderResult *result, NSError *error);
+
+/* one client per conversation; callbacks arrive on the main queue */
+@interface OCProviderClient : NSObject
+
+@property (nonatomic, readonly, retain) OCProviderInfo *info;
+
+- (id)initWithInfo:(OCProviderInfo *)info apiKey:(NSString *)apiKey baseURL:(NSString *)baseURL;
+
+/* messages hold agent messages, tools hold tool definitions */
+- (void)streamWithModel:(NSString *)model
+                 system:(NSString *)system
+               messages:(NSArray *)messages
+                  tools:(NSArray *)tools
+              maxTokens:(NSUInteger)maxTokens
+                 onText:(OCProviderTextBlock)onText
+             completion:(OCProviderDoneBlock)completion;
+
+/* drops the callbacks of the request in flight */
 - (void)cancel;
-- (NSArray *)availableModels;
-@end
 
-#pragma mark - Built-in Providers
-
-@interface OCAnthropicProvider : NSObject <OCModelProvider>
-- (instancetype)initWithApiKey:(NSString *)key;
-@end
-
-@interface OCOpenAIProvider : NSObject <OCModelProvider>
-- (instancetype)initWithApiKey:(NSString *)key;
-@end
-
-@interface OCGoogleProvider : NSObject <OCModelProvider>
-- (instancetype)initWithApiKey:(NSString *)key;
-@end
-
-@interface OCOllamaProvider : NSObject <OCModelProvider>
-- (instancetype)initWithBaseURL:(NSString *)url;
-@end
-
-@interface OCGroqProvider : NSObject <OCModelProvider>
-- (instancetype)initWithApiKey:(NSString *)key;
-@end
-
-@interface OCTogetherProvider : NSObject <OCModelProvider>
-- (instancetype)initWithApiKey:(NSString *)key;
-@end
-
-@interface OCOpenRouterProvider : NSObject <OCModelProvider>
-- (instancetype)initWithApiKey:(NSString *)key;
-@end
-
-@interface OCMistralProvider : NSObject <OCModelProvider>
-- (instancetype)initWithApiKey:(NSString *)key;
-@end
-
-@interface OCDeepseekProvider : NSObject <OCModelProvider>
-- (instancetype)initWithApiKey:(NSString *)key;
-@end
-
-@interface OCCustomProvider : NSObject <OCModelProvider>
-- (instancetype)initWithBaseURL:(NSString *)url apiKey:(NSString *)key;
-@end
-
-#pragma mark - Provider Registry
-
-@interface OCProviderRegistry : NSObject
-
-@property (nonatomic, readonly) NSArray *providers;
-@property (nonatomic, copy) NSString *defaultProviderId;
-
-- (void)registerProvider:(id<OCModelProvider>)provider;
-- (void)removeProvider:(NSString *)providerId;
-- (id<OCModelProvider>)providerForId:(NSString *)providerId;
-- (id<OCModelProvider>)defaultProvider;
-
-/* Model routing - find best provider for a model ID */
-- (id<OCModelProvider>)providerForModel:(NSString *)modelId;
-
-/* Failover: try providers in order until one succeeds */
-- (void)chatCompletionWithFailover:(NSDictionary *)request
-                           models:(NSArray *)modelIds
-                          onChunk:(OCProviderStreamBlock)onChunk
-                       completion:(OCProviderCompletionBlock)completion;
-
-/* List all available models across all providers */
-- (NSArray *)allAvailableModels;
-
-@end
-
-#pragma mark - Cron Parser
-
-@interface OCCronParser : NSObject
-/* Parse 5-field cron expression and check if it matches a date */
-+ (BOOL)expression:(NSString *)expr matchesDate:(NSDate *)date;
-/* Calculate next fire date from a cron expression */
-+ (NSDate *)nextFireDate:(NSString *)expr afterDate:(NSDate *)date;
-/* Validate cron expression */
-+ (BOOL)isValidExpression:(NSString *)expr;
-@end
-
-#pragma mark - Markdown Processor
-
-@interface OCMarkdownProcessor : NSObject
-/* Convert markdown to plain text (strip formatting) */
-+ (NSString *)stripMarkdown:(NSString *)markdown;
-/* Convert markdown to HTML */
-+ (NSString *)markdownToHTML:(NSString *)markdown;
-/* Convert markdown to Telegram-compatible formatting */
-+ (NSString *)markdownToTelegram:(NSString *)markdown;
-/* Convert markdown to IRC formatting (bold, italic, etc.) */
-+ (NSString *)markdownToIRC:(NSString *)markdown;
 @end

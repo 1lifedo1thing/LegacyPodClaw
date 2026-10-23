@@ -5,12 +5,12 @@
 
 #import "ToolDispatcher.h"
 #import "Guardrails.h"
+#import "ToolInputCheck.h"
 #import <UIKit/UIKit.h>
 
 #define TOOL_DEFAULT_TIMEOUT 30.0
 #define CONFIRM_TIMEOUT 60.0
 #define RESULT_MAX_CHARS 16384
-#define SUMMARY_MAX_CHARS 400
 
 static NSString *const OCToolErrorDomain = @"OCToolDispatcher";
 
@@ -92,31 +92,6 @@ static NSError *ToolError(NSString *message) {
     return nil;
 }
 
-static BOOL ValueMatchesType(id value, NSString *type) {
-    if (!type) return YES;
-    if ([type isEqualToString:@"string"]) return [value isKindOfClass:[NSString class]];
-    if ([type isEqualToString:@"object"]) return [value isKindOfClass:[NSDictionary class]];
-    if ([type isEqualToString:@"array"]) return [value isKindOfClass:[NSArray class]];
-    if ([type isEqualToString:@"number"] || [type isEqualToString:@"integer"] || [type isEqualToString:@"boolean"])
-        return [value isKindOfClass:[NSNumber class]];
-    return YES;
-}
-
-static NSString *SchemaProblem(NSDictionary *schema, NSDictionary *input) {
-    NSDictionary *props = [schema objectForKey:@"properties"];
-    for (NSString *key in [schema objectForKey:@"required"]) {
-        id value = [input objectForKey:key];
-        if (!value || value == [NSNull null]) return [NSString stringWithFormat:@"missing required parameter '%@'", key];
-    }
-    for (NSString *key in input) {
-        NSString *type = [[props objectForKey:key] objectForKey:@"type"];
-        if (![type isKindOfClass:[NSString class]]) continue;
-        if (!ValueMatchesType([input objectForKey:key], type))
-            return [NSString stringWithFormat:@"parameter '%@' must be of type %@", key, type];
-    }
-    return nil;
-}
-
 /* file tools whose path argument the guardrails must see first */
 static BOOL PathCheckForTool(NSString *name, OCFileOp *op) {
     static NSDictionary *ops;
@@ -130,13 +105,6 @@ static BOOL PathCheckForTool(NSString *name, OCFileOp *op) {
     if (!n) return NO;
     *op = (OCFileOp)[n unsignedIntegerValue];
     return YES;
-}
-
-static NSString *InputSummary(NSDictionary *input) {
-    NSData *json = [NSJSONSerialization dataWithJSONObject:input options:0 error:nil];
-    NSString *s = json ? [[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] autorelease] : @"{}";
-    if ([s length] > SUMMARY_MAX_CHARS) s = [[s substringToIndex:SUMMARY_MAX_CHARS] stringByAppendingString:@"…"];
-    return s;
 }
 
 static NSString *ResultString(id result) {
@@ -155,6 +123,7 @@ static NSString *ResultString(id result) {
 static NSString *CallerText(OCToolCaller caller) {
     switch (caller) {
         case OCToolCallerRemote: return @"A remote gateway client";
+        case OCToolCallerChannel: return @"A chat channel message";
         case OCToolCallerAgent: return @"The background agent";
         default: return @"The assistant";
     }
@@ -177,10 +146,10 @@ static NSString *CallerText(OCToolCaller caller) {
         return;
     }
 
-    NSString *problem = SchemaProblem(tool.inputSchema, input);
+    NSString *problem = OCToolSchemaProblem(tool.inputSchema, input);
     if (problem) { completion(nil, ToolError(problem)); return; }
 
-    BOOL confirm = tool.requiresConfirmation;
+    BOOL confirm = tool.requiresConfirmation || caller == OCToolCallerChannel;
     NSString *reason = nil;
     OCFileOp op;
     if (PathCheckForTool(tool.name, &op)) {
@@ -189,13 +158,24 @@ static NSString *CallerText(OCToolCaller caller) {
                                                     forOperation:op];
         if (v.action == OCGuardrailBlock) { completion(nil, ToolError(v.reason)); return; }
         if (v.action == OCGuardrailConfirm) { confirm = YES; reason = v.reason; }
+        /* a remote client could read files and send them out with a web tool, so it always asks */
+        if (caller == OCToolCallerRemote) confirm = YES;
     }
 
     void (^run)(void) = ^{ [self _invoke:tool input:input completion:completion]; };
     if (!confirm) { run(); return; }
 
+    BOOL tooLong = NO;
+    NSString *keyText = OCToolApprovalText(input, &tooLong);
+    if (tooLong) {
+        completion(nil, ToolError(@"a command or path is too long to show for approval, so the call was refused"));
+        return;
+    }
+    NSMutableDictionary *rest = [[input mutableCopy] autorelease];
+    [rest removeObjectsForKeys:OCToolApprovalFields()];
     NSMutableString *message = [NSMutableString stringWithFormat:@"%@ wants to run \"%@\".\n\n%@",
-                                CallerText(caller), tool.name, InputSummary(input)];
+                                CallerText(caller), tool.name, keyText];
+    if ([rest count]) [message appendFormat:@"\nOther input:\n%@", OCToolOtherInputText(rest)];
     if (reason) [message appendFormat:@"\n\n%@", reason];
     _OCToolConfirmation *c = [[_OCToolConfirmation alloc] initWithTitle:@"Allow Tool?" message:message
         decision:^(BOOL allowed) {
@@ -221,7 +201,7 @@ static NSString *CallerText(OCToolCaller caller) {
     NSTimeInterval timeout = tool.timeout > 0 ? tool.timeout : TOOL_DEFAULT_TIMEOUT;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        finish(nil, ToolError([NSString stringWithFormat:@"tool timed out after %.0f s", timeout]));
+        finish(nil, ToolError([NSString stringWithFormat:@"tool timed out after %.0f s; it may still complete", timeout]));
     });
 
     @try {

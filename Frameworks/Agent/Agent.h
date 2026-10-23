@@ -19,23 +19,23 @@
 
 #pragma mark - Model Configuration
 
-typedef NS_ENUM(NSUInteger, OCModelProvider) {
-    OCModelProviderAnthropic = 0,
-    OCModelProviderOpenAI,
-    OCModelProviderOllama,
-    OCModelProviderCustom
-};
-
 @interface OCModelConfig : NSObject
-@property (nonatomic, assign) OCModelProvider provider;
-@property (nonatomic, copy) NSString *modelId;           // e.g., "claude-sonnet-4-20250514"
+@property (nonatomic, copy) NSString *providerId;        // see OCProviderInfo, defaults to anthropic
+@property (nonatomic, copy) NSString *modelId;           // empty means the provider default
 @property (nonatomic, copy) NSString *apiKey;
-@property (nonatomic, copy) NSString *baseURL;           // Custom endpoint
+@property (nonatomic, copy) NSString *baseURL;           // empty means the provider default
 @property (nonatomic, assign) NSUInteger maxTokens;      // Response token limit
 @property (nonatomic, assign) NSUInteger contextWindow;  // Total context budget
-@property (nonatomic, assign) float temperature;
-@property (nonatomic, assign) NSTimeInterval timeout;    // Default 120s
 @end
+
+/* who asked for a tool call, shown in the confirmation dialog */
+typedef NS_ENUM(NSUInteger, OCToolCaller) {
+    OCToolCallerChat = 0,
+    OCToolCallerAgent,
+    OCToolCallerRemote,
+    /* text from a chat channel is untrusted, so every call it causes is confirmed on the device */
+    OCToolCallerChannel,
+};
 
 #pragma mark - Tool Definition
 
@@ -67,7 +67,12 @@ typedef NS_ENUM(NSUInteger, OCAgentMessageRole) {
 @property (nonatomic, copy) NSString *toolCallId;
 @property (nonatomic, copy) NSDictionary *toolInput;
 @property (nonatomic, copy) id toolResult;
+@property (nonatomic, assign) BOOL isError;
+/* assistant turns: the tool calls the model made, and the provider blocks to send back unchanged */
+@property (nonatomic, retain) NSArray *toolCalls;
+@property (nonatomic, retain) NSArray *rawContent;
 @property (nonatomic, assign) NSUInteger estimatedTokens;
++ (OCAgentMessage *)messageWithRole:(OCAgentMessageRole)role content:(NSString *)content;
 @end
 
 #pragma mark - Agent Delegate
@@ -121,6 +126,9 @@ typedef NS_ENUM(NSUInteger, OCAgentMessageRole) {
 @property (nonatomic, retain) OCModelConfig *modelConfig;
 @property (nonatomic, copy) NSString *systemPrompt;
 @property (nonatomic, readonly) BOOL isProcessing;
+/* off sends no tools to the model; defaults to on */
+@property (nonatomic, assign) BOOL toolsEnabled;
+@property (nonatomic, assign) OCToolCaller toolCaller;
 
 /* Token budget management */
 @property (nonatomic, assign) NSUInteger maxContextTokens;  // Default 4096 (conservative)
@@ -131,6 +139,8 @@ typedef NS_ENUM(NSUInteger, OCAgentMessageRole) {
 - (void)registerTool:(OCToolDefinition *)tool;
 - (void)removeTool:(NSString *)toolName;
 - (NSArray *)registeredTools;
+/* registered tools plus mcp tools whose names do not clash with them */
+- (NSArray *)availableTools;
 
 /* MCP server connections */
 - (void)addMCPServer:(OCMCPClient *)server;
@@ -138,11 +148,12 @@ typedef NS_ENUM(NSUInteger, OCAgentMessageRole) {
 
 /* Run agent */
 - (void)processMessage:(NSString *)userMessage;
-- (void)processMessage:(NSString *)userMessage withContext:(NSArray *)additionalMessages;
 - (void)abort;
 
 /* Context management */
 - (void)clearContext;
+/* replaces the conversation with earlier turns, oldest first */
+- (void)loadHistory:(NSArray *)messages;
 - (void)addSystemMessage:(NSString *)message;
 - (NSArray *)contextMessages;
 
@@ -151,34 +162,6 @@ typedef NS_ENUM(NSUInteger, OCAgentMessageRole) {
 
 /* Estimate tokens for a string (rough: chars/4) */
 + (NSUInteger)estimateTokens:(NSString *)text;
-
-@end
-
-#pragma mark - HTTP Model Client
-
-/*
- * Low-level HTTP client for AI model APIs.
- * Handles streaming responses via chunked transfer encoding.
- * Uses NSURLConnection (iOS 6 compatible, not NSURLSession).
- */
-@interface OCModelHTTPClient : NSObject <NSURLConnectionDataDelegate>
-
-@property (nonatomic, copy) NSString *baseURL;
-@property (nonatomic, copy) NSString *apiKey;
-@property (nonatomic, assign) NSTimeInterval timeout;
-
-- (instancetype)initWithBaseURL:(NSString *)baseURL apiKey:(NSString *)apiKey;
-
-/* Streaming chat completion. onChunk called for each SSE data line. */
-- (void)chatCompletion:(NSDictionary *)requestBody
-               onChunk:(void(^)(NSDictionary *chunk))onChunk
-            completion:(void(^)(NSDictionary *fullResponse, NSError *error))completion;
-
-/* Non-streaming chat completion. */
-- (void)chatCompletionSync:(NSDictionary *)requestBody
-                completion:(void(^)(NSDictionary *response, NSError *error))completion;
-
-- (void)cancel;
 
 @end
 

@@ -62,6 +62,9 @@ static AppDelegate *_shared = nil;
     /* Initialize SQLite store */
     NSString *docsPath = [NSSearchPathForDirectoriesInDomains(
         NSDocumentDirectory, NSUserDomainMask, YES) objectAtIndex:0];
+    /* a system app's documents directory is /var/mobile/Documents, which a fresh device lacks */
+    [[NSFileManager defaultManager] createDirectoryAtPath:docsPath withIntermediateDirectories:YES
+                                               attributes:nil error:nil];
     NSString *dbPath = [docsPath stringByAppendingPathComponent:@"openclaw.db"];
 
     _store = [[OCStore alloc] initWithPath:dbPath];

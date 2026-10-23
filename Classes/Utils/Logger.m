@@ -36,6 +36,9 @@ static const NSUInteger kBufferFlushSize = 4096;
         NSString *docsPath = [NSSearchPathForDirectoriesInDomains(
             NSDocumentDirectory, NSUserDomainMask, YES) objectAtIndex:0];
         _logPath = [[docsPath stringByAppendingPathComponent:@"openclaw.log"] retain];
+        /* the logger can start before the app delegate makes the documents directory */
+        [[NSFileManager defaultManager] createDirectoryAtPath:docsPath withIntermediateDirectories:YES
+                                                   attributes:nil error:nil];
 
         if (![[NSFileManager defaultManager] fileExistsAtPath:_logPath]) {
             [[NSFileManager defaultManager] createFileAtPath:_logPath contents:nil attributes:nil];

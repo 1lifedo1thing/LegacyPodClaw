@@ -927,13 +927,15 @@ static void CPUpdateLockLabel(void) {
         _lsLabel.shadowColor = [UIColor colorWithWhite:0 alpha:0.5f];
         _lsLabel.shadowOffset = CGSizeMake(0, 1);
         _lsLabel.tag = 31337;
-        [self addSubview:_lsLabel];
     }
+    /* springboard builds a new away view for each lock, so move the label to the one on screen */
+    if (_lsLabel && self.window && _lsLabel.superview != self)
+        [self addSubview:_lsLabel];
 
     /* Position below date header if available */
     @try {
         UIView *dateHeader = [self valueForKey:@"_dateHeaderView"];
-        if (dateHeader && _lsLabel) {
+        if (dateHeader && _lsLabel.superview == self) {
             CGRect df = dateHeader.frame;
             _lsLabel.frame = CGRectMake(10, CGRectGetMaxY(df) + 2,
                                          self.bounds.size.width - 20, 18);

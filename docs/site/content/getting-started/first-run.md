@@ -1,36 +1,51 @@
 ---
 title: "First Run"
-description: "What to expect when you first launch LegacyPodClaw"
+description: "What happens when you first use LegacyPodClaw"
 weight: 3
 ---
 
-## Activating LegacyPodClaw
+## Open LegacyPodClaw
 
-After installing and configuring a provider, LegacyPodClaw integrates into iOS through system gestures:
+After you install the package and set an API key, use one of these entry points:
 
-| Gesture | What Happens |
-|---------|-------------|
-| Hold home button | AI overlay appears (replaces Voice Control / Siri) |
-| Swipe left from home | Dashboard (replaces Spotlight) |
-| Pull down Notification Center | Quick-ask widget |
-| Shake in any app | Opens AI overlay |
+| Action | Result |
+|---|---|
+| Hold the home button | The overlay opens. It replaces Voice Control, or Siri on the iPhone 4S. |
+| Swipe left from the first home screen page | The dashboard opens in place of Spotlight |
+| Pull down Notification Center | The quick-ask widget shows |
+| Tap the LegacyPodClaw icon | The full app opens |
 
-On iPhone 4S, the home-hold gesture hooks into the Siri activation path (`SBAssistantController`). On all other devices, it hooks Voice Control.
+See [Gestures and Entry Points](/guide/gestures/) for all entry points.
 
-## Your First Conversation
+## The overlay
 
-1. **Hold the home button** — the LegacyPodClaw overlay appears
-2. **Type or speak** — voice input uses the device microphone (iPod Touch 4 requires a headset mic)
-3. **The AI responds** — streaming text appears in real-time
-4. **Tools run automatically** — the AI can execute shell commands, search the web, manage files, and more (with confirmation prompts for destructive operations)
+The overlay is a quick text chat.
 
-## Memory Constraints
+1. Hold the home button. The overlay opens.
+2. Type a question and tap **Send**. The reply streams into the overlay.
+3. To close the overlay, press the home button or tap the close button.
 
-LegacyPodClaw is designed for devices with 256MB-1GB RAM:
+The overlay has no tools. It always uses Anthropic. It keeps the last 10 messages and saves them in the app's **Quick Ask** session. It does not open while the device is locked.
 
-- The app has an 80MB memory budget
-- Only 50 messages are kept in RAM per session; older messages are offloaded to SQLite
-- Memory pressure is monitored at 4 levels, with auto-shedding above 90%
-- Context is auto-compacted when token budgets are exceeded
+## The app
 
-You don't need to manage any of this — it happens automatically. But if the device feels slow, closing background apps helps.
+The app has the full chat with tools.
+
+1. Open the app.
+2. Tap the gear button and set a provider and its API key. See [Configuration](/getting-started/configuration/).
+3. Type a message. The reply streams into the chat.
+
+The model can call tools, for example to read the battery state or to make a note. Some tools need your approval. The app then shows an **Allow Tool?** alert with **Allow** and **Deny**. If you do nothing for 60 seconds, the app denies the call. See [Tools](/guide/tools/).
+
+If the app is connected to a remote gateway, the chat goes through that gateway. If not, the app sends the chat to the provider that you selected.
+
+## Memory limits
+
+LegacyPodClaw is made for devices with 256 MB to 1 GB of RAM:
+
+- The app has a memory budget of 80 MB.
+- Each chat session keeps at most 50 messages in RAM. All messages stay in SQLite.
+- The app checks its memory use every 5 seconds. At a high level, it trims the message windows and clears caches.
+- When a conversation is longer than the context budget, the app drops the oldest messages from the request.
+
+This work is automatic. If the device is slow, close background apps.

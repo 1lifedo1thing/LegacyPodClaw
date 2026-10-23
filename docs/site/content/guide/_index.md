@@ -1,7 +1,7 @@
 ---
 title: "User Guide"
-description: "Everything LegacyPodClaw can do"
+description: "What LegacyPodClaw can do and how to use it"
 weight: 2
 ---
 
-Detailed guides for every LegacyPodClaw feature.
+These pages tell how to use each LegacyPodClaw feature.

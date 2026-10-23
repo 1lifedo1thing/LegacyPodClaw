@@ -1,7 +1,7 @@
 ---
 title: "Getting Started"
-description: "Install LegacyPodClaw, configure a provider, and start chatting"
+description: "Install LegacyPodClaw, set a provider and start a chat"
 weight: 1
 ---
 
-Get LegacyPodClaw running on your jailbroken iOS 6 device in a few minutes.
+Install the package, set a model provider and its API key, then hold the home button.

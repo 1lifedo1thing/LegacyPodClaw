@@ -1,42 +1,52 @@
 ---
 title: "Music Downloads"
-description: "Search YouTube and download songs to the Music app"
+description: "Search YouTube and add songs to the Music app"
 weight: 6
 ---
 
-LegacyPodClaw can search YouTube and download songs directly to the iOS Music app.
+LegacyPodClaw can search YouTube and add songs to the iOS Music app.
 
-## How It Works
+## How it works
 
-- **Search** works directly on-device via YouTube's InnerTube API — no proxy needed
-- **Downloading** requires a lightweight proxy server on your network, because YouTube now requires JavaScript signature deciphering that can't run on iOS 6
-- Downloaded tracks are encoded as MP3 for iOS 6 Music.app compatibility and added to the device's media library
+- **Search** runs on the device. It uses YouTube's InnerTube API and needs no proxy.
+- **Download** needs the music proxy, `music_proxy.py`, on a computer on your network. YouTube now needs JavaScript signature deciphering, and iOS 6 cannot do it.
+- The proxy uses yt-dlp and ffmpeg. It converts the audio to MP3 (192 kbit/s, 44.1 kHz, stereo), because the iOS 6 Music app needs MP3.
+- The app adds the song to the Music library. If the library write fails, the app rolls it back.
 
-## Setting Up the Proxy
+## Set up the proxy
 
-On a computer on the same network as your device:
+On a computer on the same network as the device, run:
 
 ```bash
-pip3 install yt-dlp
-python3 LegacyPodClawMCP/music_proxy.py
+pip3 install yt-dlp==2026.8.19
+brew install ffmpeg
+python3 LegacyPodClawMCP/music_proxy.py --host 0.0.0.0
 ```
 
-The proxy runs on port 18790.
+- The proxy listens on port 18790. Change it with `--port` or `MUSIC_PROXY_PORT`.
+- By default, the proxy listens only on `127.0.0.1`. Use `--host` or `MUSIC_PROXY_HOST` to serve the LAN.
+- On a LAN address, the proxy needs a token. It makes the token on the first run and keeps it in `~/.config/legacypodclaw/music_proxy.token` (mode 0600).
 
-## Configuring the Device
+## Set the device
 
-Go to **Settings > LegacyPodClaw > Local Agent > Music Proxy URL** and enter:
+Go to **Settings > LegacyPodClaw > Local Agent > Music Proxy URL** and enter the URL with the token:
 
 ```
-http://YOUR_COMPUTER_IP:18790
+http://YOUR_COMPUTER_IP:18790/t/TOKEN
 ```
 
-## Usage
+## Use it
 
-Just ask the AI:
+Ask the assistant in the app, for example:
 
-- "Play Bohemian Rhapsody"
-- "Download the latest song by [artist]"
-- "Search YouTube for [song name]"
+- "Search YouTube for Bohemian Rhapsody"
+- "Download the first result"
+- "Which songs by Queen are on this iPod?"
 
-The AI searches, shows results, and downloads your selection to the Music app.
+The assistant uses the `search_music`, `download_music` and `list_music` tools.
+
+## Proxy limits
+
+- The proxy accepts only 11-character YouTube video IDs.
+- It runs at most two jobs at a time.
+- It refuses audio longer than one hour or larger than 100 MB.

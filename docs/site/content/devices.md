@@ -1,30 +1,34 @@
 ---
 title: "Supported Devices"
-description: "Full device compatibility matrix"
+description: "Device compatibility matrix"
 weight: 4
 ---
 
-LegacyPodClaw supports **all iOS 6 devices**.
+LegacyPodClaw runs on all iOS 6 devices. The app declares iPhone, iPod touch and iPad support.
 
-| Device | RAM | iOS Version | Notes |
+| Device | RAM | iOS version | Notes |
 |--------|-----|-------------|-------|
-| iPod Touch 4th gen | 256MB | 6.0-6.1.6 | Requires headset mic for voice input |
-| iPhone 3GS | 256MB | 6.0-6.1.6 | |
-| iPhone 4 | 512MB | 6.0-6.1.3 | |
-| iPhone 4S | 512MB | 6.0-6.1.3 | Home hold intercepts Siri activation path |
-| iPad 2 | 512MB | 6.0-6.1.3 | Layout adapts to screen size |
-| iPad 3rd gen | 1GB | 6.0-6.1.3 | Layout adapts to screen size |
-| iPad mini 1st gen | 512MB | 6.0-6.1.3 | Layout adapts to screen size |
+| iPod touch 4th gen | 256 MB | 6.0 to 6.1.6 | |
+| iPhone 3GS | 256 MB | 6.0 to 6.1.6 | |
+| iPhone 4 | 512 MB | 6.0 to 6.1.3 | |
+| iPhone 4S | 512 MB | 6.0 to 6.1.3 | The home-button hold opens the overlay, not Siri |
+| iPad 2 | 512 MB | 6.0 to 6.1.3 | |
+| iPad 3rd gen | 1 GB | 6.0 to 6.1.3 | |
+| iPad mini 1st gen | 512 MB | 6.0 to 6.1.3 | |
 
-## RAM Considerations
+## RAM
 
-- **256MB devices** (iPod Touch 4, iPhone 3GS): LegacyPodClaw uses an 80MB memory budget. Close background apps for best performance.
-- **512MB+ devices** (iPhone 4/4S, iPads): Comfortable headroom. Multiple apps can run alongside LegacyPodClaw.
+The app has a memory budget of 80 MB. The budget is the same on all devices.
 
-## iPhone 4S Notes
+- On a 256 MB device (iPod touch 4, iPhone 3GS), close background apps if the device is slow.
+- A device with 512 MB or more keeps more memory free for other apps.
 
-The iPhone 4S has Siri, which also activates on home-button hold. LegacyPodClaw hooks `SBAssistantController` to intercept this. If Siri appears instead of LegacyPodClaw after installation, reboot the device.
+See [Memory Management](/developer/memory/) for the details.
 
-## iPad Notes
+## iPhone 4S
 
-LegacyPodClaw's UI adapts to the larger screen. The `UIDeviceFamily` in the package includes iPad (added in v0.3.0).
+On the iPhone 4S, a home-button hold starts Siri. The tweak hooks `SBAssistantController`, so the hold opens the LegacyPodClaw overlay. If Siri opens after you install the package, restart SpringBoard or the device.
+
+## iPad
+
+The `UIDeviceFamily` key in the app's `Info.plist` includes iPad (value 2). The app thus runs as a native iPad app.

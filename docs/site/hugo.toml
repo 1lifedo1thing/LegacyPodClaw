@@ -2,12 +2,13 @@ baseURL = "https://legacypodclaw.hesketh.pro/"
 languageCode = "en-gb"
 title = "LegacyPodClaw"
 theme = "legacypodclaw"
+disableKinds = ["taxonomy", "term"]
 
 [params]
   description = "AI assistant for iOS 6 — native Objective-C port of OpenClaw for jailbroken devices"
   author = "Matt Hesketh"
   github = "https://github.com/wrxck/LegacyPodClaw"
-  version = "0.3.0"
+  version = "0.4.0"
 
 [markup]
   [markup.highlight]

@@ -197,6 +197,12 @@ static AppDelegate *_shared = nil;
 }
 
 - (void)applicationWillEnterForeground:(UIApplication *)application {
+    /* ios reclaims a suspended app's listening socket, so the server must listen again */
+    if (_gatewayServer.isRunning) {
+        [self stopGatewayServer];
+        NSError *err = nil;
+        if (![self startGatewayServer:&err]) NSLog(@"[LegacyPodClaw] gateway server did not restart: %@", err);
+    }
     /* Reconnect if needed */
     if (_gateway.connectionState == OCGatewayStateDisconnected &&
         _gateway.host && [_gateway.host length] > 0) {

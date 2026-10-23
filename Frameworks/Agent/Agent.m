@@ -492,7 +492,8 @@ static const NSUInteger kMaxToolRounds = 8;
         [self clipboardTool],
         [self httpFetchTool],
         [self mathTool],
-        [self timerTool]
+        [self timerTool],
+        [self fileReadTool]
     ];
 }
 
@@ -599,16 +600,21 @@ static const NSUInteger kMaxToolRounds = 8;
     };
     tool.handler = ^(NSDictionary *params, OCToolResultBlock callback) {
         NSString *path = [params objectForKey:@"path"];
-        NSError *error = nil;
-        NSString *content = [NSString stringWithContentsOfFile:path
-                                                      encoding:NSUTF8StringEncoding
-                                                         error:&error];
-        if (error) { callback(nil, error); return; }
-        /* Truncate to 32KB */
-        if ([content length] > 32768) {
-            content = [content substringToIndex:32768];
+        /* read only the first 32 kb, so a large file cannot use up the 80 mb app budget */
+        NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
+        if (!fh) {
+            callback(nil, [NSError errorWithDomain:@"OCAgent" code:1
+                userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"cannot open %@", path]}]);
+            return;
         }
-        callback(content, nil);
+        NSData *data = [fh readDataOfLength:32768];
+        BOOL more = [[fh readDataOfLength:1] length] > 0;
+        [fh closeFile];
+        NSUInteger len = OCUtf8SafeLength([data bytes], [data length]);
+        NSString *content = [[[NSString alloc] initWithBytes:[data bytes] length:len
+                                                    encoding:NSUTF8StringEncoding] autorelease];
+        if (!content) { callback(@"[binary file, not shown]", nil); return; }
+        callback(more ? [content stringByAppendingString:@"\n[file cut at 32 KB]"] : content, nil);
     };
     return tool;
 }

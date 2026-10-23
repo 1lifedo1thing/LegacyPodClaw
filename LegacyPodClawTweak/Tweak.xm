@@ -141,6 +141,18 @@ static void _persistOverlayMessage(NSString *content, int role) {
 
 #define PREFS_PATH @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
 
+/* the status shows whether the app's chosen provider is set up, not only the anthropic key */
+static BOOL CPAgentConfigured(NSDictionary *prefs) {
+    NSString *provider = [prefs objectForKey:@"modelProvider"];
+    if (![provider isKindOfClass:[NSString class]] || [provider length] == 0) provider = @"anthropic";
+    if ([provider isEqualToString:@"ollama"] || [provider isEqualToString:@"custom"]) {
+        NSString *base = [prefs objectForKey:[provider stringByAppendingString:@"BaseURL"]];
+        return [base isKindOfClass:[NSString class]] && [base length] > 0;
+    }
+    NSString *secret = [provider isEqualToString:@"anthropic"] ? @"apiKey" : [provider stringByAppendingString:@"ApiKey"];
+    return [[CPSecretStore secretForKey:secret] length] > 0;
+}
+
 /* the generation five claude models think by default and accept an effort level */
 static BOOL LPCModelAlwaysThinks(NSString *model) {
     for (NSString *family in @[@"claude-opus-5", @"claude-sonnet-5", @"claude-haiku-5", @"claude-fable-5"])
@@ -619,7 +631,7 @@ static NSString *LPCAnthropicModel(NSDictionary *prefs) {
 - (void)refreshStatus {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *host = [prefs objectForKey:@"gatewayHost"];
-    BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
+    BOOL hasKey = CPAgentConfigured(prefs);
 
     if (host && [host length] > 0) {
         _statusLabel.text = [NSString stringWithFormat:@"Gateway: %@", host];
@@ -948,7 +960,7 @@ static void CPUpdateLockLabel(void) {
     if (!_lsLabel) return;
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *host = [prefs objectForKey:@"gatewayHost"];
-    BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
+    BOOL hasKey = CPAgentConfigured(prefs);
 
     if (host && [host length] > 0)
         _lsLabel.text = [NSString stringWithFormat:@"LegacyPodClaw - %@", host];
@@ -1312,7 +1324,7 @@ static UIView *_buildDashboard(CGRect frame) {
     /* Status cards */
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *host = [prefs objectForKey:@"gatewayHost"];
-    BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
+    BOOL hasKey = CPAgentConfigured(prefs);
 
     UIView *statusCard = [[[UIView alloc] initWithFrame:CGRectMake(10, y, w-20, 50)] autorelease];
     statusCard.backgroundColor = [UIColor colorWithWhite:1 alpha:0.1f];

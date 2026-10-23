@@ -155,6 +155,7 @@ static NSString *ResultString(id result) {
 static NSString *CallerText(OCToolCaller caller) {
     switch (caller) {
         case OCToolCallerRemote: return @"A remote gateway client";
+        case OCToolCallerChannel: return @"A chat channel message";
         case OCToolCallerAgent: return @"The background agent";
         default: return @"The assistant";
     }
@@ -180,7 +181,7 @@ static NSString *CallerText(OCToolCaller caller) {
     NSString *problem = SchemaProblem(tool.inputSchema, input);
     if (problem) { completion(nil, ToolError(problem)); return; }
 
-    BOOL confirm = tool.requiresConfirmation;
+    BOOL confirm = tool.requiresConfirmation || caller == OCToolCallerChannel;
     NSString *reason = nil;
     OCFileOp op;
     if (PathCheckForTool(tool.name, &op)) {

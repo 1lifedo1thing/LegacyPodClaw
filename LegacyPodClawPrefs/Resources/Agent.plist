@@ -10,7 +10,7 @@
 			<key>label</key>
 			<string>Model Provider</string>
 			<key>footerText</key>
-			<string>Configure the AI model for local agent mode (when no gateway is connected).</string>
+			<string>Configure the AI model for local agent mode (when no gateway is connected). Keys and base URLs for providers other than Anthropic are set in the app: Settings, Model Provider. The overlay and widget always use Anthropic.</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -29,6 +29,12 @@
 			<array>
 				<string>anthropic</string>
 				<string>openai</string>
+				<string>google</string>
+				<string>groq</string>
+				<string>together</string>
+				<string>openrouter</string>
+				<string>mistral</string>
+				<string>deepseek</string>
 				<string>ollama</string>
 				<string>custom</string>
 			</array>
@@ -36,8 +42,14 @@
 			<array>
 				<string>Anthropic</string>
 				<string>OpenAI</string>
+				<string>Google Gemini</string>
+				<string>Groq</string>
+				<string>Together AI</string>
+				<string>OpenRouter</string>
+				<string>Mistral</string>
+				<string>DeepSeek</string>
 				<string>Ollama (Local)</string>
-				<string>Custom Endpoint</string>
+				<string>Custom (OpenAI-compatible)</string>
 			</array>
 			<key>PostNotification</key>
 			<string>pro.matthesketh.legacypodclaw/prefsChanged</string>
@@ -50,7 +62,7 @@
 			<key>key</key>
 			<string>apiKey</string>
 			<key>label</key>
-			<string>API Key</string>
+			<string>Anthropic Key</string>
 			<key>placeholder</key>
 			<string>sk-ant-...</string>
 			<key>PostNotification</key>
@@ -66,9 +78,9 @@
 			<key>label</key>
 			<string>Model ID</string>
 			<key>placeholder</key>
-			<string>claude-sonnet-4-20250514</string>
+			<string>claude-sonnet-5-5</string>
 			<key>default</key>
-			<string>claude-sonnet-4-20250514</string>
+			<string>claude-sonnet-5-5</string>
 			<key>PostNotification</key>
 			<string>pro.matthesketh.legacypodclaw/prefsChanged</string>
 		</dict>
@@ -82,7 +94,7 @@
 			<key>label</key>
 			<string>Custom URL</string>
 			<key>placeholder</key>
-			<string>https://api.anthropic.com</string>
+			<string>https://host/v1</string>
 			<key>PostNotification</key>
 			<string>pro.matthesketh.legacypodclaw/prefsChanged</string>
 		</dict>

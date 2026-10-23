@@ -140,6 +140,21 @@ static void _persistOverlayMessage(NSString *content, int role) {
 @end
 
 #define PREFS_PATH @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
+
+/* the generation five claude models think by default and accept an effort level */
+static BOOL LPCModelAlwaysThinks(NSString *model) {
+    for (NSString *family in @[@"claude-opus-5", @"claude-sonnet-5", @"claude-haiku-5", @"claude-fable-5"])
+        if ([model hasPrefix:family]) return YES;
+    return NO;
+}
+
+/* the overlay talks to anthropic only, so another provider's model id would be rejected */
+static NSString *LPCAnthropicModel(NSDictionary *prefs) {
+    NSString *provider = [prefs objectForKey:@"modelProvider"];
+    NSString *model = [prefs objectForKey:@"modelId"];
+    if ((provider && ![provider isEqualToString:@"anthropic"]) || [model length] == 0) return @"claude-sonnet-5-5";
+    return model;
+}
 #define PANEL_HEIGHT 290.0f
 #define ANIM_DURATION 0.28f
 
@@ -401,7 +416,7 @@ static void _persistOverlayMessage(NSString *content, int role) {
     
     /* Get model from prefs */
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-    NSString *model = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514";
+    NSString *model = LPCAnthropicModel(prefs);
 
     if (!apiKey || [apiKey length] == 0) {
         [self _showResult:@"No API key set.\n\nGo to Settings \u2192 LegacyPodClaw."]; return;
@@ -413,7 +428,7 @@ static void _persistOverlayMessage(NSString *content, int role) {
     /* Trim history to last 10 messages to fit context window */
     while ([_conversationHistory count] > 10) [_conversationHistory removeObjectAtIndex:0];
 
-    NSDictionary *body = @{
+    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithDictionary:@{
         @"model": model,
         @"max_tokens": @(1024),
         @"stream": @YES,
@@ -423,7 +438,12 @@ static void _persistOverlayMessage(NSString *content, int role) {
                     "system control), direct the user to the LegacyPodClaw app where all tools are available. "
                     "In this overlay you can answer questions, have conversations, and give advice.",
         @"messages": _conversationHistory
-    };
+    }];
+    /* current models always think and pay for it from max_tokens, so give room and ask for little thought */
+    if (LPCModelAlwaysThinks(model)) {
+        [body setObject:@(4096) forKey:@"max_tokens"];
+        [body setObject:@{@"effort": @"low"} forKey:@"output_config"];
+    }
     NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     NSDictionary *headers = @{
         @"Content-Type": @"application/json",
@@ -1290,7 +1310,7 @@ static UIView *_buildDashboard(CGRect frame) {
 
     UILabel *modelLabel = [[[UILabel alloc] initWithFrame:CGRectMake(12, 26, w-44, 16)] autorelease];
     modelLabel.text = [NSString stringWithFormat:@"Model: %@",
-        [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514"];
+        LPCAnthropicModel(prefs)];
     modelLabel.textColor = [UIColor colorWithWhite:0.7f alpha:1];
     modelLabel.font = [UIFont systemFontOfSize:11];
     modelLabel.backgroundColor = [UIColor clearColor];

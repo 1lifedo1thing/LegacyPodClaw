@@ -45,6 +45,7 @@ LegacyPodClaw_FILES = \
 	Frameworks/Tools/ToolDispatcher.m \
 	Frameworks/Tools/SkillRegistry.m \
 	Frameworks/Tools/NotesReminders.m \
+	Frameworks/Tools/NotesDatabase.m \
 	Frameworks/Tools/MusicDownloader.m \
 	Frameworks/System/System.m \
 	Frameworks/System/TLSClient.m \
@@ -82,7 +83,7 @@ LegacyPodClaw_CFLAGS = \
 
 LegacyPodClaw_OBJCFLAGS = -fno-objc-arc
 
-LegacyPodClaw_FRAMEWORKS = UIKit Foundation Security CoreGraphics QuartzCore AudioToolbox AVFoundation SystemConfiguration CFNetwork IOKit
+LegacyPodClaw_FRAMEWORKS = UIKit Foundation Security CoreGraphics QuartzCore AudioToolbox AVFoundation SystemConfiguration CFNetwork IOKit EventKit
 
 LegacyPodClaw_LIBRARIES = sqlite3
 

@@ -1,56 +1,37 @@
-#!/bin/bash
+#!/bin/sh
 # LegacyPodClaw post-install script
-# Sets up permissions for system database access
 
-# Create clawpod group if it doesn't exist
-if ! grep -q "^clawpod:" /etc/group 2>/dev/null; then
-    echo "clawpod:*:555:mobile,root" >> /etc/group
+PREFS=/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist
+SHARED=/var/mobile/Library/LegacyPodClaw
+DAEMON=/Library/LaunchDaemons/pro.matthesketh.legacypodclaw.daemon.plist
+
+# files owned by mobile need no extra group; undo the clawpod group that 0.3.0 created
+if grep -q '^clawpod:' /etc/group 2>/dev/null; then
+    grep -v '^clawpod:' /etc/group > /etc/group.lpc && cat /etc/group.lpc > /etc/group && rm -f /etc/group.lpc
+    for d in /var/mobile/Library/Notes /var/mobile/Library/Calendar /var/mobile/Library/SMS \
+             /var/mobile/Media/iTunes_Control/iTunes /var/mobile/Media/iTunes_Control/Music; do
+        [ -d "$d" ] && chgrp -R mobile "$d" 2>/dev/null
+    done
 fi
 
-# Add mobile to clawpod group if not already
-if ! id -nG mobile 2>/dev/null | grep -q clawpod; then
-    # Append mobile to group
-    sed -i '' "s/^clawpod:\(.*\)/clawpod:\1,mobile/" /etc/group 2>/dev/null
-fi
+# files the app, settings and springboard pass to each other
+mkdir -p "$SHARED"
+chown mobile:mobile "$SHARED"
+chmod 700 "$SHARED"
 
-# Set group ownership and permissions on databases LegacyPodClaw needs
-# Notes database
-if [ -d /var/mobile/Library/Notes ]; then
-    chgrp -R clawpod /var/mobile/Library/Notes/ 2>/dev/null
-    chmod 770 /var/mobile/Library/Notes/ 2>/dev/null
-    chmod 660 /var/mobile/Library/Notes/* 2>/dev/null
-fi
-
-# Calendar/Reminders database
-if [ -d /var/mobile/Library/Calendar ]; then
-    chgrp -R clawpod /var/mobile/Library/Calendar/ 2>/dev/null
-    chmod 770 /var/mobile/Library/Calendar/ 2>/dev/null
-    chmod 660 /var/mobile/Library/Calendar/Calendar.sqlitedb* 2>/dev/null
-fi
-
-# Media/Music database (for Music library integration)
-if [ -d /var/mobile/Media/iTunes_Control/iTunes ]; then
-    chgrp clawpod /var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb* 2>/dev/null
-    chmod 660 /var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb* 2>/dev/null
-fi
-if [ -d /var/mobile/Media/iTunes_Control/Music ]; then
-    chgrp -R clawpod /var/mobile/Media/iTunes_Control/Music/ 2>/dev/null
-    chmod 770 /var/mobile/Media/iTunes_Control/Music/ 2>/dev/null
-fi
-
-# SMS database (for Messages.app integration)
-if [ -d /var/mobile/Library/SMS ]; then
-    chgrp clawpod /var/mobile/Library/SMS/sms.db* 2>/dev/null
-    chmod 660 /var/mobile/Library/SMS/sms.db* 2>/dev/null
-fi
-
-# Preferences
 # settings hold the api base url, so only mobile may read or write them
-chown mobile:mobile /var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist 2>/dev/null
-chmod 600 /var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist 2>/dev/null
+if [ -f "$PREFS" ]; then
+    chown mobile:mobile "$PREFS"
+    chmod 600 "$PREFS"
+fi
 
-# Start daemon
-launchctl load /Library/LaunchDaemons/pro.matthesketh.legacypodclaw.daemon.plist 2>/dev/null
+# load the new daemon binary and mach services; prerm unloaded the old one
+launchctl unload "$DAEMON" 2>/dev/null
+launchctl load "$DAEMON"
 
-echo "LegacyPodClaw: Permissions configured"
+# ask cydia to restart springboard, so the new tweak loads
+if [ -n "$CYDIA" ]; then
+    eval "echo 'finish:restart' >&${CYDIA%% *}"
+fi
+
 exit 0

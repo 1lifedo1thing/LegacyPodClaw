@@ -6,6 +6,7 @@
  * Posts Darwin notifications when settings change so the app can reload.
  */
 
+#import "SharedFiles.h"
 #import "LegacyPodClawPrefsRootListController.h"
 #import <notify.h>
 #import <objc/message.h>
@@ -187,7 +188,7 @@ static BOOL WriteSecret(id value, PSSpecifier *specifier) {
 
 - (void)testBanner {
     NSDictionary *data = @{@"title": @"LegacyPodClaw", @"message": @"This is a test notification banner!"};
-    [data writeToFile:@"/tmp/openclaw-banner.plist" atomically:YES];
+    CPWriteSharedPlist(CP_BANNER_FILE, data);
     notify_post("pro.matthesketh.legacypodclaw/showBanner");
 }
 
@@ -314,7 +315,7 @@ static BOOL WriteSecret(id value, PSSpecifier *specifier) {
 
 - (void)testBadge {
     NSDictionary *data = @{@"count": @5};
-    [data writeToFile:@"/tmp/clawpod-badge.plist" atomically:YES];
+    CPWriteSharedPlist(CP_BADGE_FILE, data);
     notify_post("pro.matthesketh.legacypodclaw/updateBadge");
 
     UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"Badge"
@@ -325,7 +326,7 @@ static BOOL WriteSecret(id value, PSSpecifier *specifier) {
 
 - (void)testClearBadge {
     NSDictionary *data = @{@"count": @0};
-    [data writeToFile:@"/tmp/clawpod-badge.plist" atomically:YES];
+    CPWriteSharedPlist(CP_BADGE_FILE, data);
     notify_post("pro.matthesketh.legacypodclaw/updateBadge");
 }
 
@@ -408,26 +409,6 @@ static BOOL WriteSecret(id value, PSSpecifier *specifier) {
             [apiKey substringFromIndex:MAX(0, (NSInteger)[apiKey length] - 4)],
             model]
         delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
-    [a show]; [a release];
-}
-
-- (void)testAPISend {
-    /* Write a test flag that the app will pick up */
-    [@{@"test": @YES, @"message": @"Say hello in one word"} writeToFile:@"/tmp/clawpod-debug-request.plist" atomically:YES];
-    notify_post("pro.matthesketh.legacypodclaw/debugAPITest");
-    UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"Sent"
-        message:@"Open LegacyPodClaw app — a test message will appear."
-        delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
-    [a show]; [a release];
-}
-
-- (void)testShowRaw {
-    NSString *raw = [NSString stringWithContentsOfFile:@"/tmp/clawpod-last-response.txt"
-        encoding:NSUTF8StringEncoding error:nil];
-    if (!raw || [raw length] == 0) raw = @"No response saved yet. Send a message in the app or overlay first.";
-    if ([raw length] > 800) raw = [raw substringToIndex:800];
-    UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"Last Raw Response"
-        message:raw delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
     [a show]; [a release];
 }
 

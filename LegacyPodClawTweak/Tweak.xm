@@ -19,6 +19,8 @@
 #import <sqlite3.h>
 #import "TLSClient.h"
 #import "SecretStore.h"
+#import "SharedFiles.h"
+#import <objc/message.h>
 
 
 /* Session persistence — write overlay conversations to the app's DB */
@@ -704,7 +706,31 @@ static UIWindow *_cpWindow = nil;
 static CPAssistantPanel *_cpPanel = nil;
 static BOOL _cpGracePeriod = NO; /* Ignore home-up right after hold-to-show */
 
+@interface SBAwayController : NSObject
++ (id)sharedAwayController;
+- (BOOL)isLocked;
+- (void)unlockWithSound:(BOOL)sound unlockSource:(int)source;
+@end
+
+@interface SBDeviceLockController : NSObject
++ (id)sharedController;
+- (BOOL)isPasswordProtected;
+@end
+
+static BOOL CPDeviceIsLocked(void) {
+    id away = [%c(SBAwayController) sharedAwayController];
+    return [away respondsToSelector:@selector(isLocked)] && [away isLocked];
+}
+
+static BOOL CPDeviceHasPasscode(void) {
+    id lock = [%c(SBDeviceLockController) sharedController];
+    /* assume a passcode when the class is missing, so we never skip it */
+    return ![lock respondsToSelector:@selector(isPasswordProtected)] || [lock isPasswordProtected];
+}
+
 static void CPShow(void) {
+    /* the panel shows past conversations, so never draw it over the lock screen */
+    if (CPDeviceIsLocked()) return;
     if (!_cpWindow) {
         CGRect bounds = [[UIScreen mainScreen] bounds];
         _cpWindow = [[UIWindow alloc] initWithFrame:bounds];
@@ -749,8 +775,12 @@ static void CPDismiss(void) {
 %hook SpringBoard
 
 - (void)_menuButtonWasHeld {
+    /* on the lock screen keep voice control, which apple already limits there */
+    if (CPDeviceIsLocked()) {
+        %orig;
+        return;
+    }
     CPShow();
-    /* Do NOT call %orig — prevents Voice Control from launching */
 }
 
 /*
@@ -783,8 +813,9 @@ static void CPDismiss(void) {
 %hook SBAssistantController
 
 - (BOOL)handleSiriButtonPress {
+    if (CPDeviceIsLocked()) return %orig;
     CPShow();
-    return YES; /* Consume — don't launch Siri */
+    return YES;
 }
 
 %end
@@ -825,6 +856,7 @@ static NSString *const kCPWidgetSectionID = @"pro.matthesketh.legacypodclaw.nc-w
 - (void)_loadSections {
     %orig;
 
+    if (![self respondsToSelector:@selector(_weeAppForSectionID:)] || !%c(SBWeeApp)) return;
     if ([self _weeAppForSectionID:kCPWidgetSectionID]) return;
 
     NSBundle *wb = [NSBundle bundleWithPath:@"/System/Library/WeeAppPlugins/LegacyPodClawNC.bundle"];
@@ -839,10 +871,17 @@ static NSString *const kCPWidgetSectionID = @"pro.matthesketh.legacypodclaw.nc-w
     [wa setDelegate:self];
     [controller release];
 
-    NSMutableArray *weeApps = [self valueForKey:@"_weeApps"];
-    NSMutableArray *visible = [self valueForKey:@"_visibleWeeApps"];
-    if (weeApps) [weeApps addObject:wa];
-    if (visible) [visible insertObject:wa atIndex:0];
+    /* a wrong ivar name throws here at every boot, so catch it and skip the widget */
+    @try {
+        id weeApps = [self valueForKey:@"_weeApps"];
+        id visible = [self valueForKey:@"_visibleWeeApps"];
+        if ([weeApps isKindOfClass:[NSMutableArray class]]) [weeApps addObject:wa];
+        if ([visible isKindOfClass:[NSMutableArray class]]) [visible insertObject:wa atIndex:0];
+    } @catch (NSException *e) {
+        NSLog(@"[LegacyPodClaw] NC widget not added: %@", e);
+        [wa release];
+        return;
+    }
     [wa release];
 
     /* Reload table to show the new widget */
@@ -851,20 +890,6 @@ static NSString *const kCPWidgetSectionID = @"pro.matthesketh.legacypodclaw.nc-w
     NSLog(@"[LegacyPodClaw] NC widget injected");
 }
 
-/* Provide display name for our section in Settings > Notifications */
-- (id)tableView:(id)tv cellForRowAtIndexPath:(id)ip {
-    id cell = %orig;
-    /* Check if this is our section and set the label */
-    @try {
-        if ([cell respondsToSelector:@selector(textLabel)]) {
-            UILabel *label = [cell performSelector:@selector(textLabel)];
-            if (label && [[label text] length] == 0) {
-                /* Might be our unlabeled widget - check the section */
-            }
-        }
-    } @catch (NSException *e) {}
-    return cell;
-}
 
 %end
 
@@ -951,69 +976,65 @@ static UILabel *_lsLabel = nil;
  * Hook SBAwayController's camera gesture to show our overlay instead.
  */
 
-@interface SBAwayController : NSObject
-+ (id)sharedAwayController;
-- (BOOL)handleMenuButtonHeld;
-- (void)unlockWithSound:(BOOL)sound unlockSource:(int)source;
-@end
+/*
+ * With no passcode, the camera gestures unlock and open the overlay.
+ * With a passcode, they keep apple's camera, because unlockWithSound:
+ * would skip the passcode.
+ */
+static void CPUnlockAndShow(id away) {
+    [away unlockWithSound:YES unlockSource:0];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{ CPShow(); });
+}
 
 %hook SBAwayController
 
-/* Replace camera gestures with LegacyPodClaw activation */
 - (void)handleCameraPanGesture:(id)gesture {
-    /* Don't call %orig — prevents camera view from appearing.
-       The gesture recognizer still tracks — when it ends,
-       _handleCameraPanGestureEndedWithVelocity: fires and opens LegacyPodClaw. */
+    if (CPDeviceHasPasscode()) %orig;
 }
 
 - (void)handleCameraTapGesture:(id)gesture {
-    /* Tap on the grabber area → open LegacyPodClaw */
-    @try {
-        [self unlockWithSound:YES unlockSource:0];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{ CPShow(); });
-    } @catch (NSException *e) {}
+    if (CPDeviceHasPasscode()) {
+        %orig;
+        return;
+    }
+    CPUnlockAndShow(self);
 }
 
-/* Hide the camera view that sits behind the lock screen */
 - (void)_setupCameraSlideUpAnimation {
-    /* Don't call %orig — prevents camera view from being set up */
+    if (CPDeviceHasPasscode()) %orig;
 }
 
 - (void)_setupCameraSlideDownAnimation {
-    /* Don't call %orig */
+    if (CPDeviceHasPasscode()) %orig;
 }
 
 - (void)_handleCameraPanGestureEndedWithVelocity:(float)velocity {
-    /* Instead of opening camera on gesture end, unlock and show LegacyPodClaw */
-    @try {
-        [self unlockWithSound:YES unlockSource:0];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{ CPShow(); });
-    } @catch (NSException *e) {}
-    /* Don't call %orig — prevents camera from ever appearing */
+    if (CPDeviceHasPasscode()) {
+        %orig;
+        return;
+    }
+    CPUnlockAndShow(self);
 }
 
 - (void)_activateCameraAfterCall {
-    /* Block */
+    if (CPDeviceHasPasscode()) %orig;
 }
 
 - (void)activateCamera {
-    /* Block camera entirely — open LegacyPodClaw instead */
-    @try {
-        [self unlockWithSound:YES unlockSource:0];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{ CPShow(); });
-    } @catch (NSException *e) {}
+    if (CPDeviceHasPasscode()) {
+        %orig;
+        return;
+    }
+    CPUnlockAndShow(self);
 }
 
 - (void)activateCameraWithNewSessionID:(BOOL)newSession afterCall:(BOOL)afterCall {
-    /* Block this path too */
-    @try {
-        [self unlockWithSound:YES unlockSource:0];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
-            dispatch_get_main_queue(), ^{ CPShow(); });
-    } @catch (NSException *e) {}
+    if (CPDeviceHasPasscode()) {
+        %orig;
+        return;
+    }
+    CPUnlockAndShow(self);
 }
 
 %end
@@ -1081,44 +1102,25 @@ static UILabel *_lsLabel = nil;
 %hook SBVoiceControlController
 
 - (BOOL)handleHomeButtonHeld {
-    /* Already intercepted by _menuButtonWasHeld, but just in case */
+    if (CPDeviceIsLocked()) return %orig;
     CPShow();
     return YES;
 }
 
 - (void)_performDelayedHeadsetActionForVoiceControl {
-    /* BT headset long-press → LegacyPodClaw instead of Voice Control */
+    if (CPDeviceIsLocked()) {
+        %orig;
+        return;
+    }
     CPShow();
 }
 
 - (void)_performDelayedHeadsetActionForAssistant {
-    /* BT headset → LegacyPodClaw instead of Siri */
-    CPShow();
-}
-
-%end
-
-#pragma mark - Media Controller Integration
-
-/*
- * When LegacyPodClaw TTS is speaking, show it in the Now Playing controls.
- */
-
-@interface SBMediaController : NSObject
-+ (id)sharedInstance;
-- (id)nowPlayingApplication;
-- (NSString *)nowPlayingTitle;
-@end
-
-%hook SBMediaController
-
-- (id)nowPlayingTitle {
-    /* If LegacyPodClaw is speaking, show that */
-    NSString *orig = %orig;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/tmp/clawpod-speaking"]) {
-        return @"LegacyPodClaw is speaking...";
+    if (CPDeviceIsLocked()) {
+        %orig;
+        return;
     }
-    return orig;
+    CPShow();
 }
 
 %end
@@ -1147,8 +1149,7 @@ static UILabel *_lsLabel = nil;
     int badgeToken;
     notify_register_dispatch("pro.matthesketh.legacypodclaw/updateBadge", &badgeToken,
         dispatch_get_main_queue(), ^(int t) {
-            NSDictionary *data = [NSDictionary dictionaryWithContentsOfFile:
-                @"/tmp/clawpod-badge.plist"];
+            NSDictionary *data = [NSDictionary dictionaryWithContentsOfFile:CPSharedPath(CP_BADGE_FILE)];
             NSNumber *count = [data objectForKey:@"count"];
             if (!count) return;
 
@@ -1164,8 +1165,7 @@ static UILabel *_lsLabel = nil;
     int bannerToken;
     notify_register_dispatch("pro.matthesketh.legacypodclaw/showBanner", &bannerToken,
         dispatch_get_main_queue(), ^(int t) {
-            NSDictionary *data = [NSDictionary dictionaryWithContentsOfFile:
-                @"/tmp/openclaw-banner.plist"];
+            NSDictionary *data = [NSDictionary dictionaryWithContentsOfFile:CPSharedPath(CP_BANNER_FILE)];
             if (!data) return;
 
             Class BBBulletin = %c(BBBulletin);
@@ -1180,10 +1180,11 @@ static UILabel *_lsLabel = nil;
                 [[NSDate date] timeIntervalSince1970]] forKey:@"bulletinID"];
 
             id bc = [%c(SBBulletinBannerController) sharedInstance];
-            if (bc) {
+            SEL addSel = @selector(observer:addBulletin:forFeed:);
+            if ([bc respondsToSelector:addSel]) {
+                /* feed is a scalar, which performSelector:withObject:withObject: cannot pass */
                 @try {
-                    [bc performSelector:@selector(observer:addBulletin:forFeed:)
-                             withObject:nil withObject:bulletin];
+                    ((void (*)(id, SEL, id, id, unsigned))objc_msgSend)(bc, addSel, nil, bulletin, 2);
                 } @catch (NSException *e) {}
             }
             [bulletin release];
@@ -1456,16 +1457,27 @@ static void _cpShowDashboard(id self_) {
     } @catch (NSException *e) {}
 }
 
+/* the dashboard replaces spotlight, so let the user turn it off and get spotlight back */
+static BOOL CPDashboardEnabled(void) {
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
+    id value = [prefs objectForKey:@"spotlightDashboard"];
+    return value ? [value boolValue] : YES;
+}
+
 %hook SBIconController
 
 - (void)_showSearchKeyboardIfNecessary:(BOOL)necessary {
-    /* Don't call %orig — replaces Spotlight with dashboard */
+    if (!CPDashboardEnabled()) {
+        %orig;
+        return;
+    }
     _cpShowDashboard(self);
 }
 
 /* Also show dashboard during scroll (handles slow drags) */
 - (void)scrollViewDidScroll:(id)scrollView {
     %orig;
+    if (!CPDashboardEnabled()) return;
 
     @try {
         BOOL showingSearch = [self isShowingSearch];
@@ -1579,87 +1591,44 @@ static void _cpRestoreDockAndCleanup(id self_) {
 
 %end
 
-#pragma mark - Multi-Process Hooks
+#pragma mark - Lock Screen Images
 
-/*
- * These hooks apply to apps OTHER than SpringBoard.
- * The tweak is now injected into all UIKit processes.
- * We use %ctor to check the bundle ID and only apply relevant hooks.
- */
+/* serve our camera grabber art without replacing apple's files in SpringBoard.app */
+static NSString *const kCPImageDir = @"/Library/Application Support/LegacyPodClaw/Images";
 
-/*
- * Safari: Add "Ask LegacyPodClaw" to action sheets, intercept URL loading
- * for AI-powered page summaries.
- */
-%group SafariHooks
+%hook UIImage
 
-%hook BrowserController
-
-- (void)loadURL:(id)url {
-    %orig;
-    /* Log URL loads - can be used for browsing history AI analysis */
-    NSLog(@"[LegacyPodClaw/Safari] URL loaded: %@", url);
++ (id)imageNamed:(NSString *)name {
+    static NSSet *names;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        names = [[NSSet alloc] initWithObjects:@"CameraGrabber", @"DefaultCameraUI", @"LockScreenCameraShadow", nil];
+    });
+    /* this runs for every image springboard loads, so reject most names cheaply */
+    if (![name isKindOfClass:[NSString class]] || ![name rangeOfString:@"Camera"].length) return %orig;
+    NSString *base = [[name stringByDeletingPathExtension] stringByReplacingOccurrencesOfString:@"~iphone" withString:@""];
+    base = [base stringByReplacingOccurrencesOfString:@"@2x" withString:@""];
+    if ([names containsObject:base]) {
+        NSString *path = [kCPImageDir stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"%@@2x~iphone.png", base]];
+        UIImage *img = [UIImage imageWithContentsOfFile:path];
+        if (img) return img;
+    }
+    return %orig;
 }
 
 %end
 
-%end /* SafariHooks */
+#pragma mark - Shake
 
-/*
- * MobileSMS: Monitor for replies in the LegacyPodClaw chat thread.
- * Auto-detect when user replies and route to the daemon.
- */
-%group SMSHooks
-
-%hook CKConversationListController
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    /* Notify daemon to check for LegacyPodClaw replies */
-    notify_post("pro.matthesketh.legacypodclaw/checkSMSReplies");
-}
-
-%end
-
-%end /* SMSHooks */
-
-/*
- * MobileMail: Add "Summarize with LegacyPodClaw" option.
- */
-%group MailHooks
-
-%hook MFMessageBody
-
-- (id)htmlContent {
-    id content = %orig;
-    /* Could inject a "Summarize" button here */
-    return content;
-}
-
-%end
-
-%end /* MailHooks */
-
-/*
- * Music: Show LegacyPodClaw status in now playing.
- */
-%group MusicHooks
-%end
-
-/*
- * Universal hooks (all UIKit apps): add shake-to-ask gesture.
- */
+/* shake-to-ask; the filter plist loads the tweak only into springboard */
 %group UniversalHooks
 
 %hook UIWindow
 
 - (void)motionEnded:(int)motion withEvent:(id)event {
     %orig;
-    /* Shake gesture (motion == 1) opens LegacyPodClaw in any app */
-    if (motion == 1) {
-        /* Send notification to SpringBoard to show overlay */
-        notify_post("pro.matthesketh.legacypodclaw/shakeActivate");
-    }
+    if (motion == 1) CPShow();
 }
 
 %end
@@ -1682,31 +1651,6 @@ static void _cpRestoreDockAndCleanup(id self_) {
         %init(_ungrouped);
         NSLog(@"[LegacyPodClaw] Loaded in SpringBoard");
 
-        /* Listen for shake-activate from other apps */
-        int token;
-        notify_register_dispatch("pro.matthesketh.legacypodclaw/shakeActivate", &token,
-            dispatch_get_main_queue(), ^(int t) {
-                CPShow();
-            });
-
-    } else if ([bundleId isEqualToString:@"com.apple.mobilesafari"]) {
-        %init(SafariHooks);
-        NSLog(@"[LegacyPodClaw] Loaded in Safari");
-
-    } else if ([bundleId isEqualToString:@"com.apple.MobileSMS"]) {
-        %init(SMSHooks);
-        NSLog(@"[LegacyPodClaw] Loaded in Messages");
-
-    } else if ([bundleId isEqualToString:@"com.apple.mobilemail"]) {
-        %init(MailHooks);
-        NSLog(@"[LegacyPodClaw] Loaded in Mail");
-
-    } else if ([bundleId isEqualToString:@"com.apple.Music"]) {
-        %init(MusicHooks);
-        NSLog(@"[LegacyPodClaw] Loaded in Music");
+        %init(UniversalHooks);
     }
-
-    /* Universal hooks for ALL apps (including SpringBoard) */
-    %init(UniversalHooks);
-    NSLog(@"[LegacyPodClaw] Universal hooks loaded in %@", bundleId);
 }

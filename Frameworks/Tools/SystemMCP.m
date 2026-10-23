@@ -6,6 +6,7 @@
  * Messages.app. Uses private frameworks for device control.
  */
 
+#import "SharedFiles.h"
 #import "SystemMCP.h"
 #import <UIKit/UIKit.h>
 #import <AudioToolbox/AudioToolbox.h>
@@ -165,7 +166,7 @@ static sqlite3 *_openSMSDB(void) {
 
     /* Also post a banner notification */
     NSDictionary *bannerData = @{@"title": @"LegacyPodClaw", @"message": text};
-    [bannerData writeToFile:@"/tmp/openclaw-banner.plist" atomically:YES];
+    CPWriteSharedPlist(CP_BANNER_FILE, bannerData);
     notify_post("pro.matthesketh.legacypodclaw/showBanner");
 
     NSLog(@"[LegacyPodClaw] Message sent to Messages.app: %@", text);
@@ -458,7 +459,7 @@ static sqlite3 *_openSMSDB(void) {
             @"title": [p objectForKey:@"title"] ?: @"LegacyPodClaw",
             @"message": [p objectForKey:@"message"]
         };
-        [data writeToFile:@"/tmp/openclaw-banner.plist" atomically:YES];
+        CPWriteSharedPlist(CP_BANNER_FILE, data);
         notify_post("pro.matthesketh.legacypodclaw/showBanner");
         cb(@"Notification posted", nil);
     };

@@ -5,9 +5,10 @@
 
 #import <Foundation/Foundation.h>
 
-/* key names: apiKey, authToken, authPassword, deviceToken */
+/* gateway credentials, provider api keys and channel tokens */
 @interface CPSecretStore : NSObject
 
++ (NSArray *)allSecretKeys;
 + (BOOL)isSecretKey:(NSString *)key;
 
 /* nil when the secret is missing, the keychain is locked, or clawpodd is not running */

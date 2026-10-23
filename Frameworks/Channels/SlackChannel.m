@@ -76,6 +76,18 @@ static const NSUInteger kSlackMaxChars = 3500;
     });
 }
 
+/* slack answers these on every retry, so retrying only repeats the failure */
+static BOOL SlackTokenRefused(NSString *error) {
+    return [@[@"invalid_auth", @"not_authed", @"not_allowed_token_type", @"account_inactive", @"token_revoked",
+              @"token_expired"] containsObject:error ?: @""];
+}
+
+- (void)_stopWithError:(NSString *)reason {
+    [self stop];
+    [self _setError:reason];
+    NSLog(@"[Slack] %@", reason);
+}
+
 - (void)_connect {
     [self _teardown];
     NSUInteger gen = ++_generation;
@@ -84,7 +96,12 @@ static const NSUInteger kSlackMaxChars = 3500;
                completion:^(NSDictionary *json, NSError *error) {
         if (gen != _generation) return;
         if (error || ![[json objectForKey:@"ok"] boolValue]) {
-            [self _retry:error ? [error localizedDescription] : [NSString stringWithFormat:@"auth.test: %@", [json objectForKey:@"error"]]];
+            NSString *code = [[json objectForKey:@"error"] description];
+            if (!error && SlackTokenRefused(code)) {
+                [self _stopWithError:[NSString stringWithFormat:@"Slack refused the bot token (%@). Check the Bot Token in Settings.", code]];
+                return;
+            }
+            [self _retry:error ? [error localizedDescription] : [NSString stringWithFormat:@"auth.test: %@", code]];
             return;
         }
         [_botUserId release];
@@ -100,6 +117,11 @@ static const NSUInteger kSlackMaxChars = 3500;
         if (gen != _generation) return;
         NSString *url = [json objectForKey:@"url"];
         if (error || ![[json objectForKey:@"ok"] boolValue] || ![url isKindOfClass:[NSString class]]) {
+            NSString *code = [[json objectForKey:@"error"] description];
+            if (!error && SlackTokenRefused(code)) {
+                [self _stopWithError:[NSString stringWithFormat:@"Slack refused the app token (%@). Check the App Token in Settings.", code]];
+                return;
+            }
             [self _retry:error ? [error localizedDescription] : [NSString stringWithFormat:@"apps.connections.open: %@", [json objectForKey:@"error"]]];
             return;
         }

@@ -119,8 +119,6 @@ static AppDelegate *_shared = nil;
     }
     NSLog(@"[LegacyPodClaw] %lu tools registered", (unsigned long)[seen count]);
 
-    /* Setup notes/reminders database */
-    [OCNotesReminders setupWithStore:_store];
     [OCExtendedTools setupMemoryTables:_store];
 
     /* Load local sessions immediately (don't wait for gateway) */

@@ -21,13 +21,6 @@ if [ -d /var/mobile/Library/Notes ]; then
     chmod 660 /var/mobile/Library/Notes/* 2>/dev/null
 fi
 
-# Calendar/Reminders database
-if [ -d /var/mobile/Library/Calendar ]; then
-    chgrp -R clawpod /var/mobile/Library/Calendar/ 2>/dev/null
-    chmod 770 /var/mobile/Library/Calendar/ 2>/dev/null
-    chmod 660 /var/mobile/Library/Calendar/Calendar.sqlitedb* 2>/dev/null
-fi
-
 # Media/Music database (for Music library integration)
 if [ -d /var/mobile/Media/iTunes_Control/iTunes ]; then
     chgrp clawpod /var/mobile/Media/iTunes_Control/iTunes/MediaLibrary.sqlitedb* 2>/dev/null

@@ -173,15 +173,16 @@ static const NSUInteger kSlackMaxChars = 3500;
 - (void)sendMessage:(NSString *)text toChatId:(NSString *)chatId threadId:(NSString *)threadId {
     if ([chatId length] == 0 || [text length] == 0) return;
     NSDictionary *auth = @{@"Authorization": [@"Bearer " stringByAppendingString:_botToken]};
-    for (NSString *part in OCSplitText(text, kSlackMaxChars)) {
+    OCSendPartsInOrder(OCSplitText(text, kSlackMaxChars), ^(NSString *part, dispatch_block_t done) {
         NSMutableDictionary *body = [NSMutableDictionary dictionaryWithObjectsAndKeys:chatId, @"channel", part, @"text", nil];
         if (threadId) [body setObject:threadId forKey:@"thread_ts"];
         [CPTLSClient postJSON:[kSlackAPI stringByAppendingString:@"/chat.postMessage"] headers:auth body:body
                    completion:^(NSDictionary *json, NSError *error) {
             if (error || ![[json objectForKey:@"ok"] boolValue])
                 NSLog(@"[Slack] send failed: %@", error ? [error localizedDescription] : [json objectForKey:@"error"]);
+            done();
         }];
-    }
+    });
 }
 
 - (NSDictionary *)statusInfo {

@@ -104,8 +104,8 @@ static NSDictionary *Field(NSString *label, NSString *key, NSString *type, NSStr
 }
 
 - (void)_changed {
+    /* the app's own prefsChanged listener reloads the settings; a direct call here would reconnect twice */
     notify_post("pro.matthesketh.legacypodclaw/prefsChanged");
-    [[AppDelegate shared] loadConnectionSettings];
     [self.tableView reloadData];
 }
 

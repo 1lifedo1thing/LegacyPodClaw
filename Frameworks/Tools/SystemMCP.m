@@ -22,8 +22,11 @@ static sqlite3 *_openSMSDB(void) {
     sqlite3 *db = NULL;
     if (sqlite3_open([SMS_DB_PATH UTF8String], &db) != SQLITE_OK) {
         NSLog(@"[LegacyPodClaw] Failed to open SMS DB");
+        sqlite3_close(db);
         return NULL;
     }
+    /* imagent holds sms.db open and writes to it, so wait for its lock */
+    sqlite3_busy_timeout(db, 2000);
     return db;
 }
 
@@ -53,8 +56,8 @@ static sqlite3 *_openSMSDB(void) {
             "VALUES (?, 'us', 'SMS', ?)", -1, &stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, [CLAWPOD_HANDLE UTF8String], -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 2, [CLAWPOD_HANDLE UTF8String], -1, SQLITE_TRANSIENT);
-            sqlite3_step(stmt);
-            handleId = sqlite3_last_insert_rowid(db);
+            /* a failed insert leaves last_insert_rowid at 0, which is not our row */
+            if (sqlite3_step(stmt) == SQLITE_DONE) handleId = sqlite3_last_insert_rowid(db);
             sqlite3_finalize(stmt);
         }
     }
@@ -87,8 +90,8 @@ static sqlite3 *_openSMSDB(void) {
             NSString *guid = [NSString stringWithFormat:@"SMS;-;%@", CLAWPOD_CHAT_ID];
             sqlite3_bind_text(stmt, 1, [guid UTF8String], -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 2, [CLAWPOD_CHAT_ID UTF8String], -1, SQLITE_TRANSIENT);
-            sqlite3_step(stmt);
-            chatId = sqlite3_last_insert_rowid(db);
+            /* a failed insert leaves last_insert_rowid at 0, which is not our row */
+            if (sqlite3_step(stmt) == SQLITE_DONE) chatId = sqlite3_last_insert_rowid(db);
             sqlite3_finalize(stmt);
         }
 
@@ -400,6 +403,8 @@ static sqlite3 *_openSMSDB(void) {
     t.inputSchema = @{@"type": @"object",
         @"properties": @{@"url": @{@"type": @"string"}},
         @"required": @[@"url"]};
+    /* ios 6 dials a tel: url from an app with no system prompt */
+    t.requiresConfirmation = YES;
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSString *url = [p objectForKey:@"url"];
         [OCSystemControl openURL:url];
@@ -428,6 +433,8 @@ static sqlite3 *_openSMSDB(void) {
     t.inputSchema = @{@"type": @"object",
         @"properties": @{@"url": @{@"type": @"string"}},
         @"required": @[@"url"]};
+    /* ios 6 dials a tel: url from an app with no system prompt */
+    t.requiresConfirmation = YES;
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         [OCSystemControl openURL:[p objectForKey:@"url"]];
         cb(@"URL opened", nil);

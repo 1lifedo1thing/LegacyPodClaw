@@ -69,5 +69,8 @@
 NSString *OCStripMarkdown(NSString *markdown);
 /* splits text into pieces no longer than the limit, preferring line breaks */
 NSArray *OCSplitText(NSString *text, NSUInteger maxChars);
+/* calls send for each part; the next part waits until send calls done, so the parts arrive in order */
+typedef void (^OCPartSender)(NSString *part, dispatch_block_t done);
+void OCSendPartsInOrder(NSArray *parts, OCPartSender send);
 /* comma or whitespace separated list from a preference string */
 NSArray *OCListFromString(NSString *value);

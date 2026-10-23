@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 BUNDLE_NAME = LegacyPodClawNC
 LegacyPodClawNC_FILES = LegacyPodClawNCController.m ../Frameworks/System/SecretStore.m
 LegacyPodClawNC_INSTALL_PATH = /System/Library/WeeAppPlugins
-LegacyPodClawNC_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore
+LegacyPodClawNC_FRAMEWORKS = UIKit Foundation
 LegacyPodClawNC_RESOURCE_DIRS = Resources
 LegacyPodClawNC_CFLAGS = -fno-objc-arc -Wno-deprecated-declarations -I../Frameworks/System
 

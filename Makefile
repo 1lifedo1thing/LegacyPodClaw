@@ -19,6 +19,7 @@ LegacyPodClaw_FILES = \
 	Classes/UI/ChatCell.m \
 	Classes/UI/SessionListViewController.m \
 	Classes/UI/SettingsViewController.m \
+	Classes/UI/ChannelSettingsViewController.m \
 	Classes/Utils/Logger.m \
 	Classes/Services/ConnectionService.m \
 	Classes/Services/VoiceService.m \
@@ -33,12 +34,15 @@ LegacyPodClaw_FILES = \
 	Frameworks/Server/GatewayToken.m \
 	Frameworks/Server/ServerWebSocket.m \
 	Frameworks/Channels/ChannelManager.m \
+	Frameworks/Channels/ChannelRouter.m \
+	Frameworks/Channels/TLSWebSocket.m \
 	Frameworks/Channels/TelegramChannel.m \
 	Frameworks/Channels/DiscordChannel.m \
 	Frameworks/Channels/IRCChannel.m \
 	Frameworks/Channels/SlackChannel.m \
 	Frameworks/Channels/WebhookChannel.m \
 	Frameworks/Providers/ProviderRegistry.m \
+	Frameworks/Providers/ProviderFormats.m \
 	Frameworks/Tools/ExtendedTools.m \
 	Frameworks/Media/MediaPipeline.m \
 	Frameworks/Plugin/PluginSDK.m \
@@ -53,6 +57,7 @@ LegacyPodClaw_FILES = \
 	Frameworks/System/System.m \
 	Frameworks/System/TLSClient.m \
 	Frameworks/System/HTTPResponseParser.m \
+	Frameworks/System/HTTPFetch.m \
 	Frameworks/System/SecretStore.m
 
 LegacyPodClaw_CFLAGS = \
@@ -75,15 +80,9 @@ LegacyPodClaw_CFLAGS = \
 	-IClasses/Services \
 	-fobjc-arc-exceptions \
 	-Wno-deprecated-declarations \
-	-Wno-unused-variable \
-	-Wno-objc-method-access \
-	-Wno-incompatible-pointer-types \
-	-Wno-objc-protocol-property-synthesis \
-	-Wno-protocol \
 	-IVendor/wolfssl/include \
 	-IVendor/wolfssl-build \
-	-DWOLFSSL_USER_SETTINGS \
-	-DSECURITY_ENHANCED
+	-DWOLFSSL_USER_SETTINGS
 
 LegacyPodClaw_OBJCFLAGS = -fno-objc-arc
 

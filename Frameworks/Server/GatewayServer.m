@@ -3,13 +3,14 @@
  * LegacyPodClaw - Native Gateway Server Implementation
  *
  * Complete gateway: HTTP server + WebSocket protocol v3 + agent execution
- * + session persistence + event broadcasting + cron + Telegram channel.
+ * + session persistence + event broadcasting + cron. Chat channels run in the app.
  *
  * Memory budget: ~20MB for the gateway subsystem on 256MB device.
  */
 
 #import "GatewayServer.h"
 #import "ToolDispatcher.h"
+#import "ProviderRegistry.h"
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <notify.h>
@@ -67,14 +68,14 @@ static NSString *GWGenerateUUID(void) {
         _bindAddress = [@"0.0.0.0" copy];
         _maxConnections = 8;
         _tickInterval = kDefaultTickInterval;
-        _defaultModelId = [@"claude-sonnet-4-20250514" copy];
+        _defaultProviderId = [@"anthropic" copy];
+        _defaultModelId = [OCDefaultModelId copy];
     }
     return self;
 }
 - (void)dealloc {
     [_bindAddress release]; [_dataDirectory release]; [_defaultModelId release];
-    [_defaultApiKey release]; [_defaultBaseURL release]; [_telegramBotToken release];
-    [_telegramAllowedChatIds release];
+    [_defaultApiKey release]; [_defaultBaseURL release]; [_defaultProviderId release];
     [super dealloc];
 }
 @end
@@ -161,13 +162,13 @@ static NSString *GWGenerateUUID(void) {
     OCHTTPServer *_httpServer;
     OCStore *_store;
     OCKeyValueStore *_kvStore;
-    OCAgent *_agent;
+    NSMutableArray *_tools;
 
     NSMutableDictionary *_clients;        // connId -> OCGatewayWSClient
     NSMutableDictionary *_sessionEntries;  // key -> OCGatewaySessionEntry
     NSMutableDictionary *_sessionHistory;  // key -> NSMutableArray of message dicts
     NSMutableArray *_cronJobs;
-    NSMutableDictionary *_activeRuns;      // runId -> sessionKey
+    NSMutableDictionary *_activeRuns;      // runId -> {sessionKey, runId, agent}
 
     NSTimer *_tickTimer;
     NSTimer *_cronTimer;
@@ -186,17 +187,18 @@ static NSString *GWGenerateUUID(void) {
         _sessionHistory = [[NSMutableDictionary alloc] initWithCapacity:16];
         _cronJobs = [[NSMutableArray alloc] initWithCapacity:4];
         _activeRuns = [[NSMutableDictionary alloc] initWithCapacity:4];
+        _tools = [[NSMutableArray alloc] initWithArray:[OCBuiltinTools deviceTools]];
         _seqCounter = 0;
     }
     return self;
 }
 
 - (void)dealloc {
-    [self stop];
+    /* no notification here: a block that captured self would outlive the object */
+    [self _shutdownNotifying:NO];
     [_config release]; [_clients release]; [_sessionEntries release];
     [_sessionHistory release]; [_cronJobs release]; [_activeRuns release];
-    [_httpServer release]; [_store release];
-    [_kvStore release]; [_agent release]; [_startedAt release];
+    [_tools release]; [_webhookHandler release];
     [super dealloc];
 }
 
@@ -224,32 +226,15 @@ static NSString *GWGenerateUUID(void) {
     /* Initialize store */
     NSString *dbPath = [dataDir stringByAppendingPathComponent:@"gateway.db"];
     _store = [[OCStore alloc] initWithPath:dbPath];
-    if (![_store open:error]) return NO;
+    if (![_store open:error]) {
+        [_store release]; _store = nil;
+        return NO;
+    }
 
     [self _setupSchema];
 
     _kvStore = [[OCKeyValueStore alloc] initWithStore:_store tableName:@"gw_config"];
     [_kvStore setup:nil];
-
-    /* Initialize agent */
-    _agent = [[OCAgent alloc] init];
-    _agent.delegate = self;
-    _agent.maxContextTokens = 4096;
-    _agent.maxResponseTokens = 2048;
-
-    OCModelConfig *mc = [[[OCModelConfig alloc] init] autorelease];
-    mc.modelId = _config.defaultModelId;
-    mc.apiKey = _config.defaultApiKey;
-    mc.baseURL = _config.defaultBaseURL;
-    mc.maxTokens = 2048;
-    _agent.modelConfig = mc;
-    _agent.systemPrompt = @"You are Molty, a helpful AI assistant powered by LegacyPodClaw, "
-        @"running on an iPod Touch. Be concise and helpful.";
-
-    /* Register built-in tools */
-    for (OCToolDefinition *tool in [OCBuiltinTools deviceTools]) {
-        [_agent registerTool:tool];
-    }
 
     /* Load persisted sessions */
     [self _loadSessions];
@@ -275,7 +260,10 @@ static NSString *GWGenerateUUID(void) {
         [upgradeSelf _handleWSUpgrade:request input:input output:output pendingData:pendingData];
     }];
 
-    if (![_httpServer start:error]) return NO;
+    if (![_httpServer start:error]) {
+        [self _releaseResources];
+        return NO;
+    }
 
     /* Start tick timer */
     _tickTimer = [NSTimer scheduledTimerWithTimeInterval:_config.tickInterval
@@ -306,6 +294,21 @@ static NSString *GWGenerateUUID(void) {
 }
 
 - (void)stop {
+    [self _shutdownNotifying:YES];
+}
+
+- (void)_releaseResources {
+    _httpServer.delegate = nil;
+    [_httpServer release]; _httpServer = nil;
+    [_store close];
+    [_kvStore release]; _kvStore = nil;
+    [_store release]; _store = nil;
+    [_startedAt release]; _startedAt = nil;
+    [_sessionEntries removeAllObjects];
+    [_sessionHistory removeAllObjects];
+}
+
+- (void)_shutdownNotifying:(BOOL)notify {
     if (!_isRunning) return;
 
     [_tickTimer invalidate]; _tickTimer = nil;
@@ -320,11 +323,18 @@ static NSString *GWGenerateUUID(void) {
     }
     [_clients removeAllObjects];
 
-    [self _persistSessions];
-    [_store close];
+    for (NSDictionary *run in [_activeRuns allValues]) {
+        OCAgent *agent = [run objectForKey:@"agent"];
+        agent.delegate = nil;
+        [agent abort];
+    }
+    [_activeRuns removeAllObjects];
 
+    [self _persistSessions];
+    [self _releaseResources];
     _isRunning = NO;
 
+    if (!notify) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         if ([_delegate respondsToSelector:@selector(gatewayServerDidStop:)]) {
             [_delegate gatewayServerDidStop:self];
@@ -388,7 +398,7 @@ static NSString *GWGenerateUUID(void) {
             return;
         }
 
-        OCToolDefinition *tool = [OCToolDispatcher toolNamed:toolName inTools:[weakSelf->_agent registeredTools]];
+        OCToolDefinition *tool = [OCToolDispatcher toolNamed:toolName inTools:weakSelf->_tools];
         if (!tool || !tool.handler) {
             respond([OCHTTPResponse errorResponse:404 message:@"Tool not found"]);
             return;
@@ -403,6 +413,18 @@ static NSString *GWGenerateUUID(void) {
                 respond([OCHTTPResponse jsonResponse:@{@"ok": @YES, @"output": result ?: @""}]);
             }
         }];
+    }];
+
+    [_httpServer post:@"/webhook/incoming" handler:^(OCHTTPRequest *req, void(^respond)(OCHTTPResponse *)) {
+        if (![weakSelf _authHTTP:req respond:respond]) return;
+        NSString *(^handler)(NSDictionary *) = weakSelf.webhookHandler;
+        if (!handler) {
+            respond([OCHTTPResponse errorResponse:404 message:@"The webhook channel is not enabled"]);
+            return;
+        }
+        NSString *problem = handler([req jsonBody]);
+        respond(problem ? [OCHTTPResponse errorResponse:400 message:problem]
+                        : [OCHTTPResponse jsonResponse:@{@"ok": @YES, @"queued": @YES}]);
     }];
 
     /* Cron API */
@@ -583,7 +605,7 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
     }
     else if ([method isEqualToString:@"sessions.delete"]) {
         NSString *key = GWString(params, @"key");
-        if (key) [self deleteSession:key];
+        if (key) { [self abortSession:key]; [self deleteSession:key]; }
         [self _sendOk:reqId payload:@{} client:client];
     }
     else if ([method isEqualToString:@"sessions.reset"]) {
@@ -611,7 +633,7 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
     }
     else if ([method isEqualToString:@"tools.catalog"]) {
         NSMutableArray *tools = [NSMutableArray array];
-        for (OCToolDefinition *t in [_agent registeredTools]) {
+        for (OCToolDefinition *t in _tools) {
             [tools addObject:@{
                 @"name": t.name ?: @"",
                 @"description": t.toolDescription ?: @"",
@@ -710,37 +732,20 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
     NSString *sessionKey = GWString(params, @"key") ?: GWString(params, @"sessionKey");
     NSString *message = GWString(params, @"message");
 
-    if (!sessionKey || !message) {
+    if ([sessionKey length] == 0 || [sessionKey length] > 128 || [message length] == 0) {
         [self _sendError:reqId code:@"INVALID_REQUEST" message:@"Missing key or message" client:client];
         return;
     }
-
-    /* Ensure session exists */
-    if (![_sessionEntries objectForKey:sessionKey]) {
-        OCGatewaySessionEntry *s = [self createSession:sessionKey];
-        s.sessionKey = sessionKey;
+    if ([self _runForSession:sessionKey]) {
+        [self _sendError:reqId code:@"BUSY" message:@"A reply for this session is still running" client:client];
+        return;
     }
+
+    /* the caller chose the key, so the entry must be stored under that same key */
+    if (![_sessionEntries objectForKey:sessionKey]) [self _createSessionWithKey:sessionKey displayName:sessionKey];
 
     NSString *runId = GWGenerateUUID();
-    [_activeRuns setObject:sessionKey forKey:runId];
-
-    /* Store user message in history */
-    NSDictionary *userMsg = @{
-        @"role": @"user",
-        @"content": message,
-        @"timestamp": @([[NSDate date] timeIntervalSince1970] * 1000)
-    };
-    NSMutableArray *history = [_sessionHistory objectForKey:sessionKey];
-    if (!history) {
-        history = [NSMutableArray arrayWithCapacity:32];
-        [_sessionHistory setObject:history forKey:sessionKey];
-    }
-    [history addObject:userMsg];
-
-    /* Acknowledge request */
     [self _sendOk:reqId payload:@{@"runId": runId} client:client];
-
-    /* Send to agent */
     [self sendMessage:message sessionKey:sessionKey fromClient:client runId:runId];
 }
 
@@ -752,7 +757,8 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
 }
 
 - (void)_handleChatAbort:(NSDictionary *)params reqId:(NSString *)reqId client:(OCGatewayWSClient *)client {
-    NSString *sessionKey = GWString(params, @"sessionKey");
+    /* chat.send and sessions.delete accept "key", so abort must too */
+    NSString *sessionKey = GWString(params, @"sessionKey") ?: GWString(params, @"key");
     if (sessionKey) [self abortSession:sessionKey];
     [self _sendOk:reqId payload:@{} client:client];
 }
@@ -760,8 +766,12 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
 #pragma mark - Session Management
 
 - (OCGatewaySessionEntry *)createSession:(NSString *)displayName {
+    return [self _createSessionWithKey:GWGenerateUUID() displayName:displayName];
+}
+
+- (OCGatewaySessionEntry *)_createSessionWithKey:(NSString *)key displayName:(NSString *)displayName {
     OCGatewaySessionEntry *entry = [[OCGatewaySessionEntry alloc] init];
-    entry.sessionKey = GWGenerateUUID();
+    entry.sessionKey = key;
     entry.displayName = displayName;
     [_sessionEntries setObject:entry forKey:entry.sessionKey];
     [self _persistSessions];
@@ -779,12 +789,16 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
 - (void)deleteSession:(NSString *)key {
     [_sessionEntries removeObjectForKey:key];
     [_sessionHistory removeObjectForKey:key];
+    [_store execute:@"DELETE FROM gw_messages WHERE session_key = ?" params:@[key] error:nil];
+    [_store execute:@"DELETE FROM gw_sessions WHERE key = ?" params:@[key] error:nil];
     [self _persistSessions];
     [self broadcastEvent:@"sessions.changed" payload:@{@"action": @"deleted", @"key": key}];
 }
 
 - (void)resetSession:(NSString *)key {
+    [self abortSession:key];
     [_sessionHistory removeObjectForKey:key];
+    [_store execute:@"DELETE FROM gw_messages WHERE session_key = ?" params:@[key] error:nil];
     OCGatewaySessionEntry *entry = [_sessionEntries objectForKey:key];
     if (entry) {
         entry.totalTokens = 0;
@@ -795,107 +809,139 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
 
 #pragma mark - Agent Execution
 
+- (NSDictionary *)_runForSession:(NSString *)sessionKey {
+    for (NSDictionary *run in [_activeRuns allValues])
+        if ([[run objectForKey:@"sessionKey"] isEqualToString:sessionKey]) return run;
+    return nil;
+}
+
+- (NSDictionary *)_runForAgent:(OCAgent *)agent {
+    for (NSDictionary *run in [_activeRuns allValues])
+        if ([run objectForKey:@"agent"] == agent) return run;
+    return nil;
+}
+
+- (void)_appendMessage:(NSString *)content role:(NSString *)role toSession:(NSString *)sessionKey {
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSMutableArray *history = [_sessionHistory objectForKey:sessionKey];
+    if (!history) {
+        history = [NSMutableArray arrayWithCapacity:32];
+        [_sessionHistory setObject:history forKey:sessionKey];
+    }
+    [history addObject:@{@"role": role, @"content": content ?: @"", @"timestamp": @(now * 1000)}];
+    /* the in-memory copy only feeds context and history requests, so it stays bounded */
+    if ([history count] > 200) [history removeObjectsInRange:NSMakeRange(0, [history count] - 200)];
+    [_store execute:@"INSERT INTO gw_messages (session_key, role, content, timestamp) VALUES (?, ?, ?, ?)"
+             params:@[sessionKey, role, content ?: @"", @(now)] error:nil];
+}
+
 - (void)sendMessage:(NSString *)message
           sessionKey:(NSString *)sessionKey
           fromClient:(OCGatewayWSClient *)client
               runId:(NSString *)runId {
 
-    /* Build context from session history */
+    /* earlier turns only; the new message goes in through processMessage */
     NSArray *history = [_sessionHistory objectForKey:sessionKey];
     NSMutableArray *context = [NSMutableArray array];
-
-    /* Include last N messages as context */
     NSUInteger startIdx = [history count] > 20 ? [history count] - 20 : 0;
     for (NSUInteger i = startIdx; i < [history count]; i++) {
         NSDictionary *msg = [history objectAtIndex:i];
-        OCAgentMessage *am = [[[OCAgentMessage alloc] init] autorelease];
         NSString *role = [msg objectForKey:@"role"];
-        if ([role isEqualToString:@"user"]) am.role = OCAgentRoleUser;
-        else if ([role isEqualToString:@"assistant"]) am.role = OCAgentRoleAssistant;
+        OCAgentMessageRole r;
+        if ([role isEqualToString:@"user"]) r = OCAgentRoleUser;
+        else if ([role isEqualToString:@"assistant"]) r = OCAgentRoleAssistant;
         else continue;
-        am.content = [msg objectForKey:@"content"];
-        [context addObject:am];
+        [context addObject:[OCAgentMessage messageWithRole:r content:[msg objectForKey:@"content"]]];
     }
+    [self _appendMessage:message role:@"user" toSession:sessionKey];
 
-    /* Process through agent (this will stream back via delegate) */
-    /* Store the client/session mapping for response routing */
+    /* one agent per run, so each reply is routed to the run and session that asked for it */
+    OCAgent *agent = [[[OCAgent alloc] init] autorelease];
+    agent.maxContextTokens = 4096;
+    agent.maxResponseTokens = 2048;
+    OCModelConfig *mc = [[[OCModelConfig alloc] init] autorelease];
+    mc.providerId = _config.defaultProviderId;
+    mc.modelId = _config.defaultModelId;
+    mc.apiKey = _config.defaultApiKey;
+    mc.baseURL = _config.defaultBaseURL;
+    mc.maxTokens = 2048;
+    agent.modelConfig = mc;
+    agent.systemPrompt = @"You are Molty, a helpful AI assistant powered by LegacyPodClaw, "
+        @"running on an iPod Touch. Be concise and helpful.";
+    agent.toolCaller = OCToolCallerRemote;
+    for (OCToolDefinition *tool in _tools) [agent registerTool:tool];
+    [agent loadHistory:context];
+    agent.delegate = self;
+
     NSDictionary *runInfo = @{
         @"sessionKey": sessionKey,
         @"runId": runId,
-        @"clientConnId": client.connectionId ?: @""
+        @"clientConnId": client.connectionId ?: @"",
+        @"agent": agent
     };
     [_activeRuns setObject:runInfo forKey:runId];
-
-    [_agent processMessage:message withContext:context];
+    [agent processMessage:message];
 }
 
 - (void)abortSession:(NSString *)sessionKey {
-    [_agent abort];
+    NSDictionary *run;
+    while ((run = [self _runForSession:sessionKey])) {
+        OCAgent *agent = [run objectForKey:@"agent"];
+        agent.delegate = nil;
+        [agent abort];
+        [_activeRuns removeObjectForKey:[run objectForKey:@"runId"]];
+    }
 }
 
 #pragma mark - OCAgentDelegate
 
 - (void)agent:(OCAgent *)agent didProduceText:(NSString *)text isFinal:(BOOL)isFinal {
-    /* Find the active run and route response to subscribers */
-    for (NSString *runId in [_activeRuns allKeys]) {
-        NSDictionary *info = [_activeRuns objectForKey:runId];
-        if (![info isKindOfClass:[NSDictionary class]]) continue;
+    NSDictionary *info = [[[self _runForAgent:agent] retain] autorelease];
+    if (!info) return;
+    NSString *runId = [info objectForKey:@"runId"];
+    NSString *sessionKey = [info objectForKey:@"sessionKey"];
 
-        NSString *sessionKey = [info objectForKey:@"sessionKey"];
-        NSString *state = isFinal ? @"final" : @"delta";
+    NSDictionary *chatEvent = @{
+        @"runId": runId,
+        @"sessionKey": sessionKey ?: @"",
+        @"state": isFinal ? @"final" : @"delta",
+        @"message": @{
+            @"role": @"assistant",
+            @"content": text ?: @""
+        },
+        @"seq": @(++_seqCounter)
+    };
+    [self broadcastEvent:@"chat.event" payload:chatEvent toSession:sessionKey];
+    if (!isFinal) return;
 
-        NSDictionary *chatEvent = @{
-            @"runId": runId,
-            @"sessionKey": sessionKey ?: @"",
-            @"state": state,
-            @"message": @{
-                @"role": @"assistant",
-                @"content": text ?: @""
-            },
-            @"seq": @(++_seqCounter)
-        };
-
-        /* Broadcast to session subscribers */
-        [self broadcastEvent:@"chat.event" payload:chatEvent toSession:sessionKey];
-
-        if (isFinal) {
-            /* Store in history */
-            NSMutableArray *history = [_sessionHistory objectForKey:sessionKey];
-            if (history) {
-                [history addObject:@{
-                    @"role": @"assistant",
-                    @"content": text ?: @"",
-                    @"timestamp": @([[NSDate date] timeIntervalSince1970] * 1000)
-                }];
-            }
-
-            /* Update session metadata */
-            OCGatewaySessionEntry *entry = [_sessionEntries objectForKey:sessionKey];
-            if (entry) entry.updatedAt = [NSDate date];
-
-            [_activeRuns removeObjectForKey:runId];
-            [self broadcastEvent:@"sessions.changed" payload:@{@"action": @"updated", @"key": sessionKey}];
-        }
+    [self _appendMessage:text role:@"assistant" toSession:sessionKey];
+    OCGatewaySessionEntry *entry = [_sessionEntries objectForKey:sessionKey];
+    if (entry) {
+        entry.updatedAt = [NSDate date];
+        [self _persistSessions];
     }
+    /* the agent is still inside its callback; the autoreleased info keeps it alive until it returns */
+    agent.delegate = nil;
+    [_activeRuns removeObjectForKey:runId];
+    [self broadcastEvent:@"sessions.changed" payload:@{@"action": @"updated", @"key": sessionKey}];
 }
 
 - (void)agent:(OCAgent *)agent didFailWithError:(NSError *)error {
-    for (NSString *runId in [_activeRuns allKeys]) {
-        NSDictionary *info = [_activeRuns objectForKey:runId];
-        if (![info isKindOfClass:[NSDictionary class]]) continue;
-
-        NSString *sessionKey = [info objectForKey:@"sessionKey"];
-        [self broadcastEvent:@"chat.event" payload:@{
-            @"runId": runId,
-            @"sessionKey": sessionKey ?: @"",
-            @"state": @"error",
-            @"message": @{
-                @"role": @"assistant",
-                @"content": [NSString stringWithFormat:@"Error: %@", [error localizedDescription]]
-            }
-        } toSession:sessionKey];
-        [_activeRuns removeObjectForKey:runId];
-    }
+    NSDictionary *info = [[[self _runForAgent:agent] retain] autorelease];
+    if (!info) return;
+    NSString *runId = [info objectForKey:@"runId"];
+    NSString *sessionKey = [info objectForKey:@"sessionKey"];
+    [self broadcastEvent:@"chat.event" payload:@{
+        @"runId": runId,
+        @"sessionKey": sessionKey ?: @"",
+        @"state": @"error",
+        @"message": @{
+            @"role": @"assistant",
+            @"content": [NSString stringWithFormat:@"Error: %@", [error localizedDescription]]
+        }
+    } toSession:sessionKey];
+    agent.delegate = nil;
+    [_activeRuns removeObjectForKey:runId];
 }
 
 #pragma mark - History
@@ -964,18 +1010,6 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
     }
 }
 
-#pragma mark - Telegram
-
-- (void)startTelegramChannel {
-    /* TODO: Implement Telegram bot polling via HTTP long-poll */
-    if (!_config.telegramBotToken) return;
-    NSLog(@"[Gateway] Telegram channel would start");
-}
-
-- (void)stopTelegramChannel {
-    NSLog(@"[Gateway] Telegram channel stopped");
-}
-
 #pragma mark - Health
 
 - (NSDictionary *)healthStatus {
@@ -1032,14 +1066,16 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
     /* Load message history for each session */
     for (NSString *key in _sessionEntries) {
         NSMutableArray *msgs = [NSMutableArray array];
+        /* the same 200-message bound as the live copy; the table keeps every message */
         [_store query:@"SELECT role, content, timestamp FROM gw_messages "
-         @"WHERE session_key = ? ORDER BY timestamp"
+         @"WHERE session_key = ? ORDER BY timestamp DESC LIMIT 200"
                params:@[key] enumerate:^(OCStoreRow *row, BOOL *stop) {
-            [msgs addObject:@{
+            /* the table stores seconds and the live copy milliseconds */
+            [msgs insertObject:@{
                 @"role": [row stringForColumn:@"role"] ?: @"",
                 @"content": [row stringForColumn:@"content"] ?: @"",
-                @"timestamp": @([row doubleForColumn:@"timestamp"])
-            }];
+                @"timestamp": @([row doubleForColumn:@"timestamp"] * 1000)
+            } atIndex:0];
         } error:nil];
         [_sessionHistory setObject:msgs forKey:key];
     }

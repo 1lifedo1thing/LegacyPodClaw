@@ -151,6 +151,49 @@ static BOOL HasLineBreak(NSString *s) {
     return [s rangeOfCharacterFromSet:[NSCharacterSet newlineCharacterSet]].location != NSNotFound;
 }
 
+@interface CPTLSClient (Pins)
++ (NSArray *)pinsForHost:(NSString *)host;
+@end
+
+/* returns a connected session with the peer name and any pins checked, or nil */
+static WOLFSSL *OpenTLS(int sock, NSString *host, NSError **outError) {
+    WOLFSSL_CTX *ctx = SharedContext();
+    if (!ctx) { *outError = TLSError(CPTLSErrorSetup, gContextError ?: @"TLS setup failed"); return NULL; }
+    WOLFSSL *ssl = wolfSSL_new(ctx);
+    if (!ssl) { *outError = TLSError(CPTLSErrorSetup, @"wolfSSL session allocation failed"); return NULL; }
+    wolfSSL_set_fd(ssl, sock);
+
+    const char *hostC = [host UTF8String];
+    if (wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, hostC, (unsigned short)strlen(hostC)) != WOLFSSL_SUCCESS ||
+        wolfSSL_check_domain_name(ssl, hostC) != WOLFSSL_SUCCESS) {
+        /* without the name check the handshake would accept any valid certificate */
+        *outError = TLSError(CPTLSErrorSetup, @"Could not set the TLS host name");
+        wolfSSL_free(ssl);
+        return NULL;
+    }
+
+    int connected = wolfSSL_connect(ssl);
+    if (connected != WOLFSSL_SUCCESS) {
+        char reason[WOLFSSL_MAX_ERROR_SZ];
+        wolfSSL_ERR_error_string_n(wolfSSL_get_error(ssl, connected), reason, sizeof(reason));
+        *outError = TLSError(CPTLSErrorHandshake, [NSString stringWithFormat:@"TLS handshake with %@ failed: %s", host, reason]);
+        wolfSSL_free(ssl);
+        return NULL;
+    }
+
+    NSArray *pins = [CPTLSClient pinsForHost:host];
+    if ([pins count]) {
+        NSString *spki = SPKIHash(ssl);
+        if (!spki || ![pins containsObject:spki]) {
+            *outError = TLSError(CPTLSErrorPinning, [NSString stringWithFormat:@"Certificate for %@ does not match its pinned key", host]);
+            wolfSSL_shutdown(ssl);
+            wolfSSL_free(ssl);
+            return NULL;
+        }
+    }
+    return ssl;
+}
+
 
 @implementation CPTLSClient
 
@@ -215,41 +258,14 @@ static BOOL HasLineBreak(NSString *s) {
         }
     }
 
-    WOLFSSL_CTX *ctx = SharedContext();
-    if (!ctx) { *outError = TLSError(CPTLSErrorSetup, gContextError ?: @"TLS setup failed"); return; }
+    if (!SharedContext()) { *outError = TLSError(CPTLSErrorSetup, gContextError ?: @"TLS setup failed"); return; }
 
     int port = [url port] ? [[url port] intValue] : 443;
     int sock = ConnectSocket(host, port, outError);
     if (sock < 0) return;
 
-    WOLFSSL *ssl = wolfSSL_new(ctx);
-    if (!ssl) { close(sock); *outError = TLSError(CPTLSErrorSetup, @"wolfSSL session allocation failed"); return; }
-    wolfSSL_set_fd(ssl, sock);
-
-    const char *hostC = [host UTF8String];
-    if (wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, hostC, (unsigned short)strlen(hostC)) != WOLFSSL_SUCCESS ||
-        wolfSSL_check_domain_name(ssl, hostC) != WOLFSSL_SUCCESS) {
-        /* without the name check the handshake would accept any valid certificate */
-        *outError = TLSError(CPTLSErrorSetup, @"Could not set the TLS host name");
-        goto cleanup;
-    }
-
-    int connected = wolfSSL_connect(ssl);
-    if (connected != WOLFSSL_SUCCESS) {
-        char reason[WOLFSSL_MAX_ERROR_SZ];
-        wolfSSL_ERR_error_string_n(wolfSSL_get_error(ssl, connected), reason, sizeof(reason));
-        *outError = TLSError(CPTLSErrorHandshake, [NSString stringWithFormat:@"TLS handshake with %@ failed: %s", host, reason]);
-        goto cleanup;
-    }
-
-    NSArray *pins = [self pinsForHost:host];
-    if ([pins count]) {
-        NSString *spki = SPKIHash(ssl);
-        if (!spki || ![pins containsObject:spki]) {
-            *outError = TLSError(CPTLSErrorPinning, [NSString stringWithFormat:@"Certificate for %@ does not match its pinned key", host]);
-            goto cleanup;
-        }
-    }
+    WOLFSSL *ssl = OpenTLS(sock, host, outError);
+    if (!ssl) { close(sock); return; }
 
     {
         /* the raw path keeps percent escapes and trailing slashes that -[NSURL path] removes */
@@ -344,6 +360,204 @@ cleanup:
         }
         completion(json, nil);
     }];
+}
+
+@end
+
+#pragma mark - Long-lived connection
+
+enum { kConnReadChunk = 4096 };
+static const NSUInteger kConnMaxQueuedBytes = 512 * 1024;
+
+@interface CPTLSConnection () {
+    NSString *_host;
+    int _port;
+    BOOL _useTLS;
+    BOOL _started;
+    /* set on the main thread, read by the io thread */
+    volatile BOOL _closed;
+    int _wake[2];
+    NSMutableData *_outbox;
+    NSLock *_lock;
+}
+@end
+
+@implementation CPTLSConnection
+
+@synthesize host = _host, port = _port, useTLS = _useTLS;
+
+- (id)initWithHost:(NSString *)host port:(int)port useTLS:(BOOL)useTLS {
+    if ((self = [super init])) {
+        _host = [host copy];
+        _port = port;
+        _useTLS = useTLS;
+        _wake[0] = _wake[1] = -1;
+        _outbox = [[NSMutableData alloc] init];
+        _lock = [[NSLock alloc] init];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [_host release]; [_outbox release]; [_lock release];
+    [super dealloc];
+}
+
+- (void)open {
+    if (_started) return;
+    _started = YES;
+    if (pipe(_wake) != 0) {
+        _wake[0] = _wake[1] = -1;
+        [self _finishWithError:TLSError(CPTLSErrorSetup, @"Could not create a wake pipe")];
+        return;
+    }
+    fcntl(_wake[0], F_SETFL, O_NONBLOCK);
+    fcntl(_wake[1], F_SETFL, O_NONBLOCK);
+    /* the io thread owns a reference until it exits */
+    [self retain];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @autoreleasepool { [self _run]; }
+        [self release];
+    });
+}
+
+- (void)_wakeIOThread {
+    /* the lock stops a write into a descriptor number the io thread just closed and the system reused */
+    [_lock lock];
+    if (_wake[1] >= 0) { char b = 1; write(_wake[1], &b, 1); }
+    [_lock unlock];
+}
+
+- (void)sendData:(NSData *)data {
+    if (_closed || [data length] == 0) return;
+    [_lock lock];
+    BOOL overflow = [_outbox length] + [data length] > kConnMaxQueuedBytes;
+    if (!overflow) [_outbox appendData:data];
+    [_lock unlock];
+    if (overflow) NSLog(@"[TLS] send queue for %@ is full, dropping %lu bytes", _host, (unsigned long)[data length]);
+    [self _wakeIOThread];
+}
+
+- (void)close {
+    if (_closed) return;
+    _closed = YES;
+    _delegate = nil;
+    [self _wakeIOThread];
+}
+
+- (void)_finishWithError:(NSError *)error {
+    [error retain];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!_closed) {
+            _closed = YES;
+            [_delegate connection:self didCloseWithError:error];
+        }
+        [error release];
+    });
+}
+
+/* the connection socket is non-blocking, so wait for it to accept more bytes */
+static BOOL ConnWaitWritable(int sock, int events) {
+    struct pollfd pfd = { .fd = sock, .events = (short)events };
+    int rc;
+    do { rc = poll(&pfd, 1, kIOTimeoutSec * 1000); } while (rc < 0 && errno == EINTR);
+    return rc > 0 && !(pfd.revents & (POLLERR | POLLNVAL));
+}
+
+static BOOL ConnWrite(int sock, WOLFSSL *ssl, NSData *data) {
+    const char *p = [data bytes];
+    NSUInteger left = [data length];
+    while (left > 0) {
+        if (ssl) {
+            int chunk = (int)MIN(left, (NSUInteger)16384);
+            int n = wolfSSL_write(ssl, p, chunk);
+            if (n > 0) { p += n; left -= (NSUInteger)n; continue; }
+            int err = wolfSSL_get_error(ssl, n);
+            /* wolfssl needs the same buffer and length again after a want error */
+            if (err == WOLFSSL_ERROR_WANT_WRITE && ConnWaitWritable(sock, POLLOUT)) continue;
+            if (err == WOLFSSL_ERROR_WANT_READ && ConnWaitWritable(sock, POLLIN)) continue;
+            return NO;
+        }
+        ssize_t n = send(sock, p, left, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && errno == EAGAIN && ConnWaitWritable(sock, POLLOUT)) continue;
+        if (n <= 0) return NO;
+        p += n;
+        left -= (NSUInteger)n;
+    }
+    return YES;
+}
+
+- (void)_run {
+    NSError *error = nil;
+    WOLFSSL *ssl = NULL;
+    int sock = -1;
+
+    if (_useTLS && !SharedContext()) error = TLSError(CPTLSErrorSetup, gContextError ?: @"TLS setup failed");
+    if (!error) sock = ConnectSocket(_host, _port, &error);
+    if (sock >= 0 && _useTLS) ssl = OpenTLS(sock, _host, &error);
+    /* a blocking wolfSSL_read keeps reading past a tls 1.3 session ticket, so the outbox would wait for server data */
+    if (!error && sock >= 0) fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK);
+
+    if (!error && !_closed) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!_closed) [_delegate connectionDidOpen:self];
+        });
+        char buf[kConnReadChunk];
+        while (!_closed && !error) {
+            BOOL readable = ssl && wolfSSL_pending(ssl) > 0;
+            if (!readable) {
+                struct pollfd fds[2] = { { .fd = sock, .events = POLLIN }, { .fd = _wake[0], .events = POLLIN } };
+                int rc = poll(fds, 2, -1);
+                if (rc < 0 && errno != EINTR) { error = TLSError(CPTLSErrorIO, @"poll failed"); break; }
+                if (rc > 0 && (fds[1].revents & POLLIN)) { char drain[64]; while (read(_wake[0], drain, sizeof(drain)) > 0) {} }
+                readable = rc > 0 && (fds[0].revents & (POLLIN | POLLHUP | POLLERR));
+            }
+            if (_closed) break;
+
+            [_lock lock];
+            NSData *out = [_outbox length] ? [[_outbox copy] autorelease] : nil;
+            [_outbox setLength:0];
+            [_lock unlock];
+            if (out && !ConnWrite(sock, ssl, out)) { error = TLSError(CPTLSErrorIO, [NSString stringWithFormat:@"Writing to %@ failed", _host]); break; }
+
+            if (!readable) continue;
+            int n = ssl ? wolfSSL_read(ssl, buf, sizeof(buf)) : (int)recv(sock, buf, sizeof(buf), 0);
+            if (n > 0) {
+                NSData *chunk = [[NSData alloc] initWithBytes:buf length:(NSUInteger)n];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (!_closed) [_delegate connection:self didReceiveData:chunk];
+                    [chunk release];
+                });
+                continue;
+            }
+            if (!ssl && n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+            int err = ssl ? wolfSSL_get_error(ssl, n) : 0;
+            /* a post-handshake record with no app data; poll again */
+            if (err == WOLFSSL_ERROR_WANT_READ) continue;
+            if (err == WOLFSSL_ERROR_WANT_WRITE) { ConnWaitWritable(sock, POLLOUT); continue; }
+            error = TLSError(CPTLSErrorIO, (n == 0 || err == WOLFSSL_ERROR_ZERO_RETURN || err == SOCKET_PEER_CLOSED_E)
+                ? [NSString stringWithFormat:@"%@ closed the connection", _host]
+                : [NSString stringWithFormat:@"Reading from %@ failed (%d)", _host, err]);
+        }
+    }
+
+    /* a caller may queue a goodbye (irc QUIT, a websocket close frame) and then close at once */
+    if (!error && sock >= 0) {
+        [_lock lock];
+        NSData *last = [_outbox length] ? [[_outbox copy] autorelease] : nil;
+        [_outbox setLength:0];
+        [_lock unlock];
+        if (last) ConnWrite(sock, ssl, last);
+    }
+    if (ssl) { wolfSSL_shutdown(ssl); wolfSSL_free(ssl); }
+    if (sock >= 0) close(sock);
+    [_lock lock];
+    close(_wake[0]); close(_wake[1]);
+    _wake[0] = _wake[1] = -1;
+    [_lock unlock];
+    if (!error) error = TLSError(CPTLSErrorIO, @"Connection closed");
+    [self _finishWithError:error];
 }
 
 @end

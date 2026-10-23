@@ -125,7 +125,7 @@ static BOOL WriteSecret(id value, PSSpecifier *specifier) {
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
     if (buttonIndex == 1) {
         [[NSFileManager defaultManager] removeItemAtPath:PREFS_PATH error:nil];
-        for (NSString *key in @[@"apiKey", @"authToken", @"authPassword", @"deviceToken"])
+        for (NSString *key in [CPSecretStore allSecretKeys])
             [CPSecretStore setSecret:nil forKey:key];
         [self reloadSpecifiers];
         [self _notifyPrefsChanged];
@@ -402,7 +402,7 @@ static BOOL WriteSecret(id value, PSSpecifier *specifier) {
             message:@"Set an API key first." delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
         [a show]; [a release]; return;
     }
-    NSString *model = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514";
+    NSString *model = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-5-5";
     UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"API Config"
         message:[NSString stringWithFormat:@"Key: %@...%@\nModel: %@\n\nUse the home-hold overlay or in-app chat to test.",
             [apiKey substringToIndex:MIN(10, [apiKey length])],

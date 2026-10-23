@@ -19,6 +19,11 @@ mkdir -p "$SHARED"
 chown mobile:mobile "$SHARED"
 chmod 700 "$SHARED"
 
+# the app loads plugins only from a directory that root owns and nobody else can write
+mkdir -p /Library/LegacyPodClaw/Plugins
+chown root:wheel /Library/LegacyPodClaw /Library/LegacyPodClaw/Plugins
+chmod 755 /Library/LegacyPodClaw /Library/LegacyPodClaw/Plugins
+
 # settings hold the api base url, so only mobile may read or write them
 if [ -f "$PREFS" ]; then
     chown mobile:mobile "$PREFS"

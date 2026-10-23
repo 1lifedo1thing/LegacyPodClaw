@@ -11,7 +11,6 @@
 #define TOOL_DEFAULT_TIMEOUT 30.0
 #define CONFIRM_TIMEOUT 60.0
 #define RESULT_MAX_CHARS 16384
-#define SUMMARY_MAX_CHARS 400
 
 static NSString *const OCToolErrorDomain = @"OCToolDispatcher";
 
@@ -108,13 +107,6 @@ static BOOL PathCheckForTool(NSString *name, OCFileOp *op) {
     return YES;
 }
 
-static NSString *InputSummary(NSDictionary *input) {
-    NSData *json = [NSJSONSerialization dataWithJSONObject:input options:0 error:nil];
-    NSString *s = json ? [[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] autorelease] : @"{}";
-    if ([s length] > SUMMARY_MAX_CHARS) s = [[s substringToIndex:SUMMARY_MAX_CHARS] stringByAppendingString:@"…"];
-    return s;
-}
-
 static NSString *ResultString(id result) {
     NSString *s;
     if (!result || result == [NSNull null]) s = @"";
@@ -131,6 +123,7 @@ static NSString *ResultString(id result) {
 static NSString *CallerText(OCToolCaller caller) {
     switch (caller) {
         case OCToolCallerRemote: return @"A remote gateway client";
+        case OCToolCallerChannel: return @"A chat channel message";
         case OCToolCallerAgent: return @"The background agent";
         default: return @"The assistant";
     }
@@ -156,7 +149,7 @@ static NSString *CallerText(OCToolCaller caller) {
     NSString *problem = OCToolSchemaProblem(tool.inputSchema, input);
     if (problem) { completion(nil, ToolError(problem)); return; }
 
-    BOOL confirm = tool.requiresConfirmation;
+    BOOL confirm = tool.requiresConfirmation || caller == OCToolCallerChannel;
     NSString *reason = nil;
     OCFileOp op;
     if (PathCheckForTool(tool.name, &op)) {
@@ -182,7 +175,7 @@ static NSString *CallerText(OCToolCaller caller) {
     [rest removeObjectsForKeys:OCToolApprovalFields()];
     NSMutableString *message = [NSMutableString stringWithFormat:@"%@ wants to run \"%@\".\n\n%@",
                                 CallerText(caller), tool.name, keyText];
-    if ([rest count]) [message appendFormat:@"\nOther input: %@", InputSummary(rest)];
+    if ([rest count]) [message appendFormat:@"\nOther input:\n%@", OCToolOtherInputText(rest)];
     if (reason) [message appendFormat:@"\n\n%@", reason];
     _OCToolConfirmation *c = [[_OCToolConfirmation alloc] initWithTitle:@"Allow Tool?" message:message
         decision:^(BOOL allowed) {

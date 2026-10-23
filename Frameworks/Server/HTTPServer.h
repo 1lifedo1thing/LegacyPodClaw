@@ -90,6 +90,9 @@ typedef BOOL(^OCHTTPAuthorizer)(OCHTTPRequest *request);
 // covers the handler too, so a stalled tool cannot hold a connection slot forever
 @property (nonatomic, assign) NSTimeInterval requestTimeout;
 
+// the handler gets its own budget once auth passed, because a tool may wait for the user to approve it
+@property (nonatomic, assign) NSTimeInterval handlerTimeout;
+
 // with no authorizer set every non-public route is refused, so a missing setup fails closed
 @property (nonatomic, copy) OCHTTPAuthorizer authorizer;
 

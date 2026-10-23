@@ -297,6 +297,7 @@ static BOOL OCIsToken(NSString *s) {
         _maxBodySize = kDefaultMaxBodySize;
         _maxHeaderSize = kDefaultMaxHeaderSize;
         _requestTimeout = kDefaultRequestTimeout;
+        _handlerTimeout = kDefaultRequestTimeout;
         _routes = [[NSMutableArray alloc] initWithCapacity:16];
         _connections = [[NSMutableSet alloc] initWithCapacity:16];
     }
@@ -715,6 +716,12 @@ static BOOL OCIsToken(NSString *s) {
 
     _OCRouteEntry *route = [self _routeForRequest:req];
     if (route) {
+        [conn->timeoutTimer invalidate];
+        conn->timeoutTimer = [NSTimer scheduledTimerWithTimeInterval:_handlerTimeout
+                                                              target:self
+                                                            selector:@selector(_connectionTimeout:)
+                                                            userInfo:conn
+                                                             repeats:NO];
         route->handler(req, ^(OCHTTPResponse *response) {
             [self _sendResponse:response toConnection:conn];
         });

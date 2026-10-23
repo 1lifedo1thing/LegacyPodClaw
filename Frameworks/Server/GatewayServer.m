@@ -9,6 +9,7 @@
  */
 
 #import "GatewayServer.h"
+#import "ToolDispatcher.h"
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <notify.h>
@@ -255,6 +256,8 @@ static NSString *GWGenerateUUID(void) {
 
     /* Start HTTP server */
     _httpServer = [[OCHTTPServer alloc] init];
+    /* tool calls may wait up to 60 s for the user to approve them on the device */
+    _httpServer.handlerTimeout = 75.0;
     _httpServer.delegate = self;
     _httpServer.port = _config.port;
     _httpServer.bindAddress = _config.bindAddress;
@@ -385,23 +388,21 @@ static NSString *GWGenerateUUID(void) {
             return;
         }
 
-        /* Find and execute tool */
-        OCToolDefinition *tool = nil;
-        for (OCToolDefinition *t in [weakSelf->_agent registeredTools]) {
-            if ([t.name isEqualToString:toolName]) { tool = t; break; }
-        }
+        OCToolDefinition *tool = [OCToolDispatcher toolNamed:toolName inTools:[weakSelf->_agent registeredTools]];
         if (!tool || !tool.handler) {
             respond([OCHTTPResponse errorResponse:404 message:@"Tool not found"]);
             return;
         }
 
-        tool.handler(args, ^(id result, NSError *error) {
+        /* remote callers pass through the same schema checks and user prompt as local ones */
+        [[OCToolDispatcher shared] runTool:tool input:args caller:OCToolCallerRemote
+                                completion:^(NSString *result, NSError *error) {
             if (error) {
                 respond([OCHTTPResponse jsonResponse:@{@"ok": @NO, @"error": [error localizedDescription] ?: @""}]);
             } else {
-                respond([OCHTTPResponse jsonResponse:@{@"ok": @YES, @"output": result ?: [NSNull null]}]);
+                respond([OCHTTPResponse jsonResponse:@{@"ok": @YES, @"output": result ?: @""}]);
             }
-        });
+        }];
     }];
 
     /* Cron API */

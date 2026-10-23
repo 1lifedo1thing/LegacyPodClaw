@@ -513,6 +513,14 @@ static NSDictionary *ChannelKeys(void) {
         if (ch && [_channelManager registerChannel:ch]) [ch start];
         restarted++;
     }
+    /* a plugin that was unloaded leaves its channel registered unless it is removed here */
+    NSArray *builtIn = @[@"telegram", @"discord", @"slack", @"irc", @"webhook"];
+    for (id<OCChannel> ch in [[[_channelManager channels] copy] autorelease]) {
+        if ([builtIn containsObject:[ch channelId]] || [pluginChannels containsObject:ch]) continue;
+        NSString *gone = [[[ch channelId] copy] autorelease];
+        [_channelManager removeChannel:gone];
+        [_channelRouter resetChannel:gone];
+    }
     for (id<OCChannel> ch in pluginChannels) {
         if ([_channelManager channelForId:[ch channelId]] == ch) continue;
         if ([_channelManager registerChannel:ch]) {

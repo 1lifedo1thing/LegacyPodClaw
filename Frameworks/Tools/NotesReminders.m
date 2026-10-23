@@ -19,24 +19,33 @@ static EKEventStore *NREventStore(void) {
 static NSString *const NRDeniedMessage =
     @"Reminders access is denied. Allow it in Settings > Privacy > Reminders > LegacyPodClaw.";
 
-/* runs work on the main thread once reminders access is granted, asking the user if needed */
-static void NRWithReminders(OCToolResultBlock cb, void (^work)(EKEventStore *store)) {
-    OCToolResultBlock done = [[cb copy] autorelease];
-    void (^run)(EKEventStore *) = [[work copy] autorelease];
+/* calls ready on the main thread once reminders access is granted, asking the user if needed */
+static void NREnsureAccess(void (^ready)(NSError *error)) {
+    void (^done)(NSError *) = [[ready copy] autorelease];
     dispatch_async(dispatch_get_main_queue(), ^{
         EKAuthorizationStatus status = [EKEventStore authorizationStatusForEntityType:EKEntityTypeReminder];
-        if (status == EKAuthorizationStatusAuthorized) { run(NREventStore()); return; }
-        if (status == EKAuthorizationStatusRestricted) { done(nil, NRError(@"Reminders access is restricted on this device.")); return; }
-        if (status == EKAuthorizationStatusDenied) { done(nil, NRError(NRDeniedMessage)); return; }
+        if (status == EKAuthorizationStatusAuthorized) { done(nil); return; }
+        if (status == EKAuthorizationStatusRestricted) { done(NRError(@"Reminders access is restricted on this device.")); return; }
+        if (status == EKAuthorizationStatusDenied) { done(NRError(NRDeniedMessage)); return; }
         [NREventStore() requestAccessToEntityType:EKEntityTypeReminder completion:^(BOOL granted, NSError *error) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if (!granted) { done(nil, NRError(NRDeniedMessage)); return; }
+                if (!granted) { done(NRError(NRDeniedMessage)); return; }
                 /* a store made before the grant does not see existing reminders */
                 [_nrEventStore release];
                 _nrEventStore = [[EKEventStore alloc] init];
-                run(_nrEventStore);
+                done(nil);
             });
         }];
+    });
+}
+
+/* runs work on the main thread once reminders access is granted */
+static void NRWithReminders(OCToolResultBlock cb, void (^work)(EKEventStore *store)) {
+    OCToolResultBlock done = [[cb copy] autorelease];
+    void (^run)(EKEventStore *) = [[work copy] autorelease];
+    NREnsureAccess(^(NSError *error) {
+        if (error) done(nil, error);
+        else run(NREventStore());
     });
 }
 
@@ -79,6 +88,8 @@ static EKReminder *NRFindReminder(EKEventStore *store, NSString *rid) {
     t.name = name;
     t.toolDescription = desc;
     t.inputSchema = schema;
+    /* the dispatcher waits for the permission prompt before it starts the tool timeout */
+    if ([name rangeOfString:@"reminder"].location != NSNotFound) t.prepare = ^(void (^ready)(NSError *)) { NREnsureAccess(ready); };
     return t;
 }
 

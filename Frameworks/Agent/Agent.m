@@ -49,7 +49,7 @@ static const NSUInteger kDefaultMaxResponse = 1024;
 
 - (void)dealloc {
     [_name release]; [_toolDescription release];
-    [_inputSchema release]; [_handler release];
+    [_inputSchema release]; [_handler release]; [_prepare release];
     [super dealloc];
 }
 

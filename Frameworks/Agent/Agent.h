@@ -41,6 +41,7 @@ typedef NS_ENUM(NSUInteger, OCToolCaller) {
 
 typedef void(^OCToolResultBlock)(id result, NSError *error);
 typedef void(^OCToolHandler)(NSDictionary *params, OCToolResultBlock callback);
+typedef void(^OCToolPrepareBlock)(void (^ready)(NSError *error));
 
 @interface OCToolDefinition : NSObject
 @property (nonatomic, copy) NSString *name;
@@ -49,6 +50,8 @@ typedef void(^OCToolHandler)(NSDictionary *params, OCToolResultBlock callback);
 @property (nonatomic, copy) OCToolHandler handler;
 @property (nonatomic, assign) BOOL requiresConfirmation;
 @property (nonatomic, assign) NSTimeInterval timeout;    // Default 30s
+/* runs before the timeout starts, so a wait on the user (a system permission prompt) does not count */
+@property (nonatomic, copy) OCToolPrepareBlock prepare;
 @end
 
 #pragma mark - Agent Message

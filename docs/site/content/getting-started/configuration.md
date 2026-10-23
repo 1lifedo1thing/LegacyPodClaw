@@ -85,7 +85,7 @@ With **Self-Signed Certs** on and no fingerprint, the app refuses the connection
 | Gateway Connection | Host, Port, Use TLS, Allow Self-Signed Certs, Cert SHA-256 | The same settings as in the app |
 | Authentication | Auth Token, Password | The same settings as in the app |
 | Connection | Connect, Disconnect | Tells the app to connect or disconnect |
-| Connection | Test Connection | Shows the host and port. It does not test the connection. |
+| Connection | Test Connection | Opens a TCP connection to the gateway host and port, with a 5 s limit, and shows the result. It does not check the token. |
 | Configuration | Local Agent | Opens the Local Agent screen (see below) |
 | Configuration | Diagnostics | Shows fixed information about the memory budget and the frameworks |
 | (no title) | Reset All Settings | Deletes the settings file and all keys and tokens |

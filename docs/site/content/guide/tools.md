@@ -51,6 +51,7 @@ These calls also need approval:
 | `network_info` | Lists the network interfaces and IPv4 addresses |
 | `storage_info` | Shows the free and total space on `/` and `/var` |
 | `process_list` | Lists up to 50 running processes |
+| `read_file` | Reads up to 32 KB of a text file. The guardrails block secret paths, such as the keychain and SMS data. |
 
 ### Shell and files
 

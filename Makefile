@@ -80,15 +80,9 @@ LegacyPodClaw_CFLAGS = \
 	-IClasses/Services \
 	-fobjc-arc-exceptions \
 	-Wno-deprecated-declarations \
-	-Wno-unused-variable \
-	-Wno-objc-method-access \
-	-Wno-incompatible-pointer-types \
-	-Wno-objc-protocol-property-synthesis \
-	-Wno-protocol \
 	-IVendor/wolfssl/include \
 	-IVendor/wolfssl-build \
-	-DWOLFSSL_USER_SETTINGS \
-	-DSECURITY_ENHANCED
+	-DWOLFSSL_USER_SETTINGS
 
 LegacyPodClaw_OBJCFLAGS = -fno-objc-arc
 

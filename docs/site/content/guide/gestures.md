@@ -48,10 +48,12 @@ Pull down Notification Center. The LegacyPodClaw widget shows the status, a ques
 
 ## Lock screen
 
-- A small label below the date shows **LegacyPodClaw - Ready** when an Anthropic key is set, or the gateway host when one is set.
-- The lock screen camera grabber shows the LegacyPodClaw icon.
-- With no passcode, the camera gesture unlocks the device and opens the overlay.
-- With a passcode, the camera gesture keeps Apple's camera, so the gesture cannot skip the passcode.
+- A small label below the date bar shows the status. It shows on each lock and on the passcode keypad.
+  - **LegacyPodClaw - Connected** when a gateway host is set. The label never shows the host name.
+  - **LegacyPodClaw - Ready** when the provider that you chose in the app is set up.
+  - **LegacyPodClaw** in all other conditions.
+- With no passcode, the camera grabber shows the LegacyPodClaw icon. The camera gesture unlocks the device and opens the overlay.
+- With a passcode, the camera grabber shows Apple's camera icon. The camera gesture opens Apple's camera, so the gesture cannot skip the passcode.
 
 ## App switcher
 

@@ -4,6 +4,15 @@ description: "Release history"
 weight: 5
 ---
 
+## v0.4.1
+
+Version 0.4.1 fixes the lock screen.
+
+- The status label shows on each lock. Before, it showed only on the first lock after a respring.
+- The status label does not show the gateway host name while the device is locked. It shows **LegacyPodClaw - Connected**. Before, the host name showed on the lock screen and on the passcode keypad.
+- The status label is fully below the date bar. Before, it covered the bottom of the date by about 8 pt.
+- With a passcode, the camera grabber shows Apple's camera icon, because the gesture opens Apple's camera. With no passcode, the grabber shows the LegacyPodClaw icon and opens the overlay, as before.
+
 ## v0.4.0
 
 Version 0.4.0 is a full rewrite of the app's network, secret, tool and package code.

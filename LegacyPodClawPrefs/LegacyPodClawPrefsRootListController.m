@@ -6,16 +6,40 @@
  * Posts Darwin notifications when settings change so the app can reload.
  */
 
+#import "SharedFiles.h"
 #import "LegacyPodClawPrefsRootListController.h"
 #import <notify.h>
+#import <objc/message.h>
 #import <sqlite3.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <sys/sysctl.h>
 #import <signal.h>
+#import "SecretStore.h"
 
 #define PREFS_DOMAIN @"pro.matthesketh.legacypodclaw"
 #define PREFS_CHANGED_NOTIFICATION "pro.matthesketh.legacypodclaw/prefsChanged"
 #define PREFS_PATH @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
+
+/* secrets live in the keychain through clawpodd, never in the plist */
+static id ReadSecretOrPreference(PSListController *self, SEL superSel, PSSpecifier *specifier) {
+    NSString *key = [specifier propertyForKey:@"key"];
+    if ([CPSecretStore isSecretKey:key]) return [CPSecretStore secretForKey:key];
+    struct objc_super sup = {self, [PSListController class]};
+    return ((id (*)(struct objc_super *, SEL, PSSpecifier *))objc_msgSendSuper)(&sup, superSel, specifier);
+}
+
+static BOOL WriteSecret(id value, PSSpecifier *specifier) {
+    NSString *key = [specifier propertyForKey:@"key"];
+    if (![CPSecretStore isSecretKey:key]) return NO;
+    if (![CPSecretStore setSecret:value forKey:key]) {
+        UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Not Saved"
+            message:@"clawpodd did not store the value. Unlock the device and check that clawpodd runs."
+            delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
+        [alert show]; [alert release];
+    }
+    notify_post(PREFS_CHANGED_NOTIFICATION);
+    return YES;
+}
 
 @implementation LegacyPodClawPrefsRootListController
 
@@ -35,7 +59,12 @@
     notify_post(PREFS_CHANGED_NOTIFICATION);
 }
 
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    return ReadSecretOrPreference(self, _cmd, specifier);
+}
+
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    if (WriteSecret(value, specifier)) return;
     [super setPreferenceValue:value specifier:specifier];
     [self _notifyPrefsChanged];
 }
@@ -95,8 +124,9 @@
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
     if (buttonIndex == 1) {
-        /* Delete prefs file */
         [[NSFileManager defaultManager] removeItemAtPath:PREFS_PATH error:nil];
+        for (NSString *key in [CPSecretStore allSecretKeys])
+            [CPSecretStore setSecret:nil forKey:key];
         [self reloadSpecifiers];
         [self _notifyPrefsChanged];
     }
@@ -115,7 +145,12 @@
     return _specifiers;
 }
 
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    return ReadSecretOrPreference(self, _cmd, specifier);
+}
+
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    if (WriteSecret(value, specifier)) return;
     [super setPreferenceValue:value specifier:specifier];
     notify_post(PREFS_CHANGED_NOTIFICATION);
 }
@@ -153,7 +188,7 @@
 
 - (void)testBanner {
     NSDictionary *data = @{@"title": @"LegacyPodClaw", @"message": @"This is a test notification banner!"};
-    [data writeToFile:@"/tmp/openclaw-banner.plist" atomically:YES];
+    CPWriteSharedPlist(CP_BANNER_FILE, data);
     notify_post("pro.matthesketh.legacypodclaw/showBanner");
 }
 
@@ -280,7 +315,7 @@
 
 - (void)testBadge {
     NSDictionary *data = @{@"count": @5};
-    [data writeToFile:@"/tmp/clawpod-badge.plist" atomically:YES];
+    CPWriteSharedPlist(CP_BADGE_FILE, data);
     notify_post("pro.matthesketh.legacypodclaw/updateBadge");
 
     UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"Badge"
@@ -291,7 +326,7 @@
 
 - (void)testClearBadge {
     NSDictionary *data = @{@"count": @0};
-    [data writeToFile:@"/tmp/clawpod-badge.plist" atomically:YES];
+    CPWriteSharedPlist(CP_BADGE_FILE, data);
     notify_post("pro.matthesketh.legacypodclaw/updateBadge");
 }
 
@@ -361,39 +396,19 @@
 
 - (void)testAPIConnection {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-    NSString *apiKey = [prefs objectForKey:@"apiKey"];
+    NSString *apiKey = [CPSecretStore secretForKey:@"apiKey"];
     if (!apiKey || [apiKey length] == 0) {
         UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"No API Key"
             message:@"Set an API key first." delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
         [a show]; [a release]; return;
     }
-    NSString *model = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514";
+    NSString *model = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-5-5";
     UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"API Config"
         message:[NSString stringWithFormat:@"Key: %@...%@\nModel: %@\n\nUse the home-hold overlay or in-app chat to test.",
             [apiKey substringToIndex:MIN(10, [apiKey length])],
             [apiKey substringFromIndex:MAX(0, (NSInteger)[apiKey length] - 4)],
             model]
         delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
-    [a show]; [a release];
-}
-
-- (void)testAPISend {
-    /* Write a test flag that the app will pick up */
-    [@{@"test": @YES, @"message": @"Say hello in one word"} writeToFile:@"/tmp/clawpod-debug-request.plist" atomically:YES];
-    notify_post("pro.matthesketh.legacypodclaw/debugAPITest");
-    UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"Sent"
-        message:@"Open LegacyPodClaw app — a test message will appear."
-        delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
-    [a show]; [a release];
-}
-
-- (void)testShowRaw {
-    NSString *raw = [NSString stringWithContentsOfFile:@"/tmp/clawpod-last-response.txt"
-        encoding:NSUTF8StringEncoding error:nil];
-    if (!raw || [raw length] == 0) raw = @"No response saved yet. Send a message in the app or overlay first.";
-    if ([raw length] > 800) raw = [raw substringToIndex:800];
-    UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"Last Raw Response"
-        message:raw delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
     [a show]; [a release];
 }
 

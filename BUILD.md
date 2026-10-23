@@ -1,123 +1,86 @@
-# LegacyPodClaw - Build & Install Guide
+# LegacyPodClaw - Build and Install
 
 ## Overview
 
-Native Objective-C port of LegacyPodClaw AI assistant for jailbroken iOS 6 devices.
-- **Target**: iPod Touch 4th gen (ARMv7, 256MB RAM, iOS 6.1.6)
-- **Architecture**: PicoClaw-inspired lightweight native runtime
-- **Memory budget**: 80MB app limit on 256MB device
-- **No ARC**: Manual retain/release for maximum memory control
+LegacyPodClaw is a native AI assistant for jailbroken iOS 6 devices.
+
+- **Target:** iOS 6.0 to 6.1.6, ARMv7, 256 MB RAM (iPod touch 4, iPhone 3GS, 4 and 4S, iPad 2, 3 and mini).
+- **Memory budget:** about 80 MB for the app.
+- **Memory management:** manual retain and release. Every target builds with `-fno-objc-arc`.
+- **TLS:** wolfSSL 5.9.4 (`Vendor/`), because SecureTransport on iOS 6 lacks the ciphers that many servers now require.
 
 ## Prerequisites
 
-1. **Theos** - Install from https://theos.dev/docs/installation
-   ```bash
-   export THEOS=~/theos
-   ```
+The build runs on macOS only.
 
-2. **iOS 6.1 SDK** - Place in `$THEOS/sdks/iPhoneOS6.1.sdk`
-   You can extract this from Xcode 4.6.3
+1. **Xcode** with command-line tools.
+2. **Theos** at `~/theos`. Set `THEOS=~/theos`.
+3. **The iPhoneOS 14.5 SDK** at `$THEOS/sdks/iPhoneOS14.5.sdk`. The deployment target stays 6.0, so check that each API you use exists on iOS 6.
+4. **ldid** on `PATH`.
 
-3. **ldid** - For code signing (installed with Theos)
-
-4. **dpkg** - For .deb packaging
-   ```bash
-   brew install dpkg  # macOS
-   ```
+`Vendor/libwolfssl.a` and its headers are committed. To rebuild them, run `THEOS=~/theos Vendor/build-wolfssl.sh`.
 
 ## Build
 
 ```bash
-cd openclaw-ios6
 make clean
-make package
+make package FINALPACKAGE=1
 ```
 
-This produces: `.theos/obj/debug/LegacyPodClaw.app` and a `.deb` package.
+The package is `packages/pro.matthesketh.legacypodclaw_<version>_iphoneos-arm.deb`. It holds the app, the SpringBoard tweak, the Settings bundle, the Notification Center widget and `clawpodd`.
+
+## Test
+
+The host tests run on macOS with the system SDK, under AddressSanitizer and UBSan:
+
+```bash
+make test
+```
+
+They cover the HTTP response parser, the file guardrails and the tool input checks. They do not need a device or Theos.
 
 ## Install
 
-### Via SSH (device must be on same network)
-```bash
-make package install THEOS_DEVICE_IP=<ipod-ip-address>
-```
+- **SSH:** `make package install THEOS_DEVICE_IP=<device-ip>`
+- **Cydia or Filza:** copy the `.deb` to the device and install it. Cydia then offers to restart SpringBoard.
 
-### Via Cydia/Filza
-1. Transfer the `.deb` file to the device
-2. Install via `dpkg -i pro.matthesketh.legacypodclaw_1.0.0_iphoneos-arm.deb`
-3. Run `uicache` to refresh SpringBoard
+`postinst` loads `clawpodd`, creates `/var/mobile/Library/LegacyPodClaw` (mode 0700) and `/Library/LegacyPodClaw/Plugins` (root, mode 0755), and makes the settings plist mode 0600.
 
 ## Configuration
 
-### Gateway Connection
-1. Open Settings tab
-2. Enter your LegacyPodClaw gateway host/port
-3. Enter auth token or password
-4. Tap Connect
+Configure everything in **Settings > LegacyPodClaw** or in the app's Settings screen.
 
-### Bonjour Discovery
-The app auto-discovers LegacyPodClaw gateways broadcasting `_openclaw-gw._tcp` on the local network.
+- **Provider and model:** choose a provider, a model and its API key. The default model is `claude-sonnet-5-5`.
+- **Secrets:** API keys and tokens go to the keychain through `clawpodd`, never to the settings plist.
+- **Gateway server:** the on-device gateway needs the access token shown under Gateway Server > Access Token.
+- **Channels:** each channel needs its token and a sender allow list. An empty list ignores everyone.
 
-### Local Agent Mode
-If no gateway is available, you can use the built-in agent:
-1. Settings > Local Agent > API Key (enter your Anthropic API key)
-2. The local agent runs directly on-device with minimal memory
-
-## Architecture
+## Layout
 
 ```
-openclaw-ios6/
-├── Frameworks/           # Custom lightweight frameworks
-│   ├── OCWebSocket/      # RFC 6455 WebSocket (CFStream-based)
-│   ├── OCMemory/         # Memory pool, LRU cache, pressure monitor
-│   ├── OCStore/          # SQLite wrapper with stmt caching
-│   ├── OCGateway/        # LegacyPodClaw gateway protocol v3 client
-│   ├── OCChat/           # Session & message management
-│   └── OCAgent/          # PicoClaw-inspired local agent runtime
-├── Classes/
-│   ├── AppDelegate       # App lifecycle, service initialization
-│   ├── UI/               # Full native UIKit GUI
-│   │   ├── RootVC        # Tab controller (Chat/Sessions/Settings)
-│   │   ├── ChatVC        # Streaming chat with message bubbles
-│   │   ├── ChatCell      # Efficient message cell rendering
-│   │   ├── SessionListVC # Session management
-│   │   └── SettingsVC    # Connection, agent, memory diagnostics
-│   ├── Services/
-│   │   ├── Connection    # Bonjour gateway discovery
-│   │   └── Voice         # AudioQueue mic input
-│   └── Utils/
-│       └── Logger        # Rotating file logger
-├── Resources/
-│   └── Info.plist
-├── Makefile              # Theos build system
-└── control               # Debian package metadata
+Classes/                 app delegate, UI, services
+Frameworks/
+  Agent/                 agent loop, MCP client, built-in tools
+  Channels/              Telegram, Discord, Slack, IRC, webhook, router
+  Chat/                  sessions and messages
+  Gateway/               gateway client
+  Media/                 text to speech, transcription, link reading
+  Memory/                memory pool and pressure monitor
+  Plugin/                plugin loader
+  Providers/             Anthropic and OpenAI-compatible providers
+  Server/                on-device HTTP and WebSocket gateway
+  Store/                 SQLite wrapper
+  System/                TLS client, fetch helper, secret store, clawpodd client
+  Tools/                 tool dispatcher, guardrails, device tools
+  WebSocket/             WebSocket client
+LegacyPodClawDaemon/     clawpodd: read-only system info and the keychain secret service
+LegacyPodClawTweak/      SpringBoard overlay, widget injection, lock screen hooks
+LegacyPodClawPrefs/      Settings bundle
+LegacyPodClawNC/         Notification Center widget
+LegacyPodClawMCP/        Mac-side MCP server and music proxy
+Tests/                   macOS host tests
+Vendor/                  wolfSSL build, headers and library
+layout/                  files copied into the package, and the maintainer scripts
 ```
 
-## Memory Conservation
-
-- Manual retain/release (no ARC overhead)
-- 4KB read buffers for WebSocket (not 64KB)
-- LRU cache with 2MB byte budget
-- Message window: only 50 messages in RAM per session
-- Older messages offloaded to SQLite
-- Memory pressure monitor with 4 levels
-- Auto-shed on terminal pressure (>90% budget)
-- -Os optimization, dead code stripping
-
-## Feature Parity with OpenClaw (openclaw.ai)
-
-| Feature                  | Status |
-|--------------------------|--------|
-| Gateway WebSocket v3     | Full   |
-| Chat with streaming      | Full   |
-| Session management       | Full   |
-| Auth (token/password)    | Full   |
-| Bonjour discovery        | Full   |
-| Local agent runtime      | Full   |
-| MCP client support       | Full   |
-| Built-in tools           | Full   |
-| Voice input              | Full   |
-| Memory management        | Full   |
-| SQLite persistence       | Full   |
-| Reconnection/backoff     | Full   |
-| Dark theme UI            | Full   |
+See `SECURITY.md` for the security model and `README.md` for the features.

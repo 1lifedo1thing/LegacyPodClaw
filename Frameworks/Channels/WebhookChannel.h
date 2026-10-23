@@ -1,18 +1,11 @@
-/*
- * OCWebhookChannel.h
- * LegacyPodClaw - Generic Webhook Channel
- *
- * Receives messages via HTTP POST to the gateway, sends responses
- * to a configurable callback URL.
- */
+/* generic webhook: inbound only through the authenticated gateway server, replies posted to a callback url */
+
 #import <Foundation/Foundation.h>
 #import "ChannelManager.h"
 
 @interface OCWebhookChannel : NSObject <OCChannel>
-@property (nonatomic, copy) NSString *callbackURL;    // Where to POST responses
-@property (nonatomic, copy) NSString *secretToken;    // Verify inbound webhooks
-@property (nonatomic, assign) id<OCChannelManagerDelegate> messageDelegate;
-
-/* Called by HTTP server when POST /webhook/incoming is received */
-- (void)handleInboundWebhook:(NSDictionary *)payload;
+@property (nonatomic, assign) id<OCChannelDelegate> messageDelegate;
+- (instancetype)initWithCallbackURL:(NSString *)callbackURL bearerToken:(NSString *)token;
+/* nil when accepted, otherwise the reason the payload was refused */
+- (NSString *)handleInboundPayload:(NSDictionary *)payload;
 @end

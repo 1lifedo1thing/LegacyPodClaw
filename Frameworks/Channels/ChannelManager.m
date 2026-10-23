@@ -1,58 +1,25 @@
-/*
- * OCChannelManager.m
- * LegacyPodClaw - Channel System Implementation
- *
- * Channel lifecycle, session routing, rate limiting, presence,
- * auto-reply, approval system, device pairing.
- */
+/* channel registry and the text helpers the channels share */
 
 #import "ChannelManager.h"
 
-#pragma mark - Channel Message
-
 @implementation OCChannelMessage
+
 - (instancetype)init {
     if ((self = [super init])) { _timestamp = [[NSDate date] retain]; }
     return self;
 }
+
 - (void)dealloc {
-    [_channelId release]; [_accountId release]; [_chatId release];
-    [_threadId release]; [_senderId release]; [_senderName release];
-    [_text release]; [_replyToId release]; [_attachmentURLs release];
-    [_timestamp release]; [_messageId release];
+    [_channelId release]; [_chatId release]; [_threadId release];
+    [_senderId release]; [_senderAddress release]; [_senderName release];
+    [_text release]; [_messageId release]; [_timestamp release];
     [super dealloc];
 }
-@end
-
-#pragma mark - Session Router
-
-@implementation OCSessionRouter
-
-+ (NSString *)sessionKeyForMessage:(OCChannelMessage *)message agentId:(NSString *)agentId {
-    NSString *agent = agentId ?: @"default";
-    NSString *scope = message.isGroup ? @"group" : @"direct";
-    NSString *peer = message.isDirect ? message.senderId : message.chatId;
-    return [NSString stringWithFormat:@"agent:%@:%@:%@:%@",
-            agent, scope, message.channelId, peer ?: @"unknown"];
-}
-
-+ (NSDictionary *)deliveryContextForMessage:(OCChannelMessage *)message {
-    NSMutableDictionary *ctx = [NSMutableDictionary dictionaryWithCapacity:6];
-    if (message.channelId) [ctx setObject:message.channelId forKey:@"channel"];
-    if (message.chatId) [ctx setObject:message.chatId forKey:@"chatId"];
-    if (message.threadId) [ctx setObject:message.threadId forKey:@"threadId"];
-    if (message.senderId) [ctx setObject:message.senderId forKey:@"senderId"];
-    if (message.senderName) [ctx setObject:message.senderName forKey:@"senderName"];
-    [ctx setObject:@(message.isGroup) forKey:@"isGroup"];
-    return ctx;
-}
 
 @end
-
-#pragma mark - Channel Manager
 
 @interface OCChannelManager () {
-    NSMutableDictionary *_channelMap; /* channelId -> id<OCChannel> */
+    NSMutableDictionary *_channelMap;
 }
 @end
 
@@ -64,41 +31,59 @@
     }
     return self;
 }
-- (void)dealloc { [_channelMap release]; [super dealloc]; }
 
-- (void)registerChannel:(id<OCChannel>)channel {
-    [_channelMap setObject:channel forKey:[channel channelId]];
+- (void)dealloc {
+    [self removeAllChannels];
+    [_channelMap release];
+    [super dealloc];
 }
+
+- (BOOL)registerChannel:(id<OCChannel>)channel {
+    NSString *cid = [channel channelId];
+    if ([cid length] == 0 || [_channelMap objectForKey:cid]) return NO;
+    channel.messageDelegate = self;
+    [_channelMap setObject:channel forKey:cid];
+    return YES;
+}
+
 - (void)removeChannel:(NSString *)channelId {
     id<OCChannel> ch = [_channelMap objectForKey:channelId];
-    if (ch) { [ch stop]; [_channelMap removeObjectForKey:channelId]; }
+    if (!ch) return;
+    [ch stop];
+    ch.messageDelegate = nil;
+    [_channelMap removeObjectForKey:channelId];
 }
-- (id<OCChannel>)channelForId:(NSString *)channelId {
-    return [_channelMap objectForKey:channelId];
+
+- (void)removeAllChannels {
+    for (NSString *cid in [_channelMap allKeys]) [self removeChannel:cid];
 }
+
+- (id<OCChannel>)channelForId:(NSString *)channelId { return [_channelMap objectForKey:channelId]; }
 - (NSArray *)channels { return [_channelMap allValues]; }
-- (NSArray *)connectedChannels {
-    NSMutableArray *a = [NSMutableArray array];
-    for (id<OCChannel> ch in [_channelMap allValues]) {
-        if ([ch isConnected]) [a addObject:ch];
-    }
-    return a;
+
+- (void)startAll {
+    for (id<OCChannel> ch in [_channelMap allValues]) if ([ch isConfigured]) [ch start];
 }
-- (void)startAll { for (id<OCChannel> ch in [_channelMap allValues]) [ch start]; }
-- (void)stopAll { for (id<OCChannel> ch in [_channelMap allValues]) [ch stop]; }
-- (void)startChannel:(NSString *)cid { [[_channelMap objectForKey:cid] start]; }
-- (void)stopChannel:(NSString *)cid { [[_channelMap objectForKey:cid] stop]; }
+
+- (void)stopAll {
+    for (id<OCChannel> ch in [_channelMap allValues]) [ch stop];
+}
 
 - (void)sendMessage:(NSString *)text channelId:(NSString *)channelId
              chatId:(NSString *)chatId threadId:(NSString *)threadId {
-    id<OCChannel> ch = [_channelMap objectForKey:channelId];
-    if (ch) [ch sendMessage:text toChatId:chatId threadId:threadId];
+    if ([text length] == 0 || [chatId length] == 0) return;
+    [[_channelMap objectForKey:channelId] sendMessage:text toChatId:chatId threadId:threadId];
 }
 
-- (void)broadcastMessage:(NSString *)text {
-    for (id<OCChannel> ch in [_channelMap allValues]) {
-        if ([ch isConnected]) [ch sendMessage:text toChatId:nil];
-    }
+- (void)sendTypingIndicator:(NSString *)channelId chatId:(NSString *)chatId {
+    id<OCChannel> ch = [_channelMap objectForKey:channelId];
+    if ([ch respondsToSelector:@selector(sendTypingIndicator:)]) [ch sendTypingIndicator:chatId];
+}
+
+- (void)channel:(id<OCChannel>)channel didReceiveMessage:(OCChannelMessage *)message {
+    /* a plugin channel must not speak for another channel id */
+    if (![message.channelId isEqualToString:[channel channelId]]) message.channelId = [channel channelId];
+    [_delegate channelManager:self didReceiveMessage:message];
 }
 
 - (NSDictionary *)allChannelStatus {
@@ -109,7 +94,7 @@
         [s setObject:@([ch isConfigured]) forKey:@"configured"];
         if ([ch respondsToSelector:@selector(statusInfo)]) {
             NSDictionary *extra = [ch statusInfo];
-            if (extra) [s addEntriesFromDictionary:extra];
+            if ([extra isKindOfClass:[NSDictionary class]]) [s addEntriesFromDictionary:extra];
         }
         [status setObject:s forKey:[ch channelId]];
     }
@@ -118,200 +103,57 @@
 
 @end
 
-#pragma mark - Rate Limiter
+#pragma mark - Text helpers
 
-@interface OCRateLimiter () {
-    NSMutableDictionary *_buckets; /* ip -> NSMutableArray of NSDate */
-    NSUInteger _maxRequests;
-    NSTimeInterval _window;
-}
-@end
-
-@implementation OCRateLimiter
-- (instancetype)initWithMaxRequests:(NSUInteger)max perSeconds:(NSTimeInterval)window {
-    if ((self = [super init])) {
-        _maxRequests = max; _window = window;
-        _buckets = [[NSMutableDictionary alloc] initWithCapacity:16];
+NSString *OCStripMarkdown(NSString *md) {
+    if (!md) return @"";
+    NSMutableString *r = [[md mutableCopy] autorelease];
+    for (NSString *mark in @[@"```", @"**", @"__", @"`"])
+        [r replaceOccurrencesOfString:mark withString:@"" options:0 range:NSMakeRange(0, [r length])];
+    NSMutableArray *lines = [NSMutableArray array];
+    for (NSString *line in [r componentsSeparatedByString:@"\n"]) {
+        NSString *l = line;
+        while ([l hasPrefix:@"#"]) l = [l substringFromIndex:1];
+        [lines addObject:[l length] < [line length] ? [l stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] : l];
     }
-    return self;
+    return [lines componentsJoinedByString:@"\n"];
 }
-- (void)dealloc { [_buckets release]; [super dealloc]; }
 
-- (BOOL)allowRequestFromIP:(NSString *)ip {
-    NSMutableArray *times = [_buckets objectForKey:ip];
-    if (!times) { times = [NSMutableArray array]; [_buckets setObject:times forKey:ip]; }
-    NSDate *now = [NSDate date];
-    NSDate *cutoff = [NSDate dateWithTimeIntervalSinceNow:-_window];
-    /* Prune old entries */
-    while ([times count] > 0 && [[times objectAtIndex:0] compare:cutoff] == NSOrderedAscending)
-        [times removeObjectAtIndex:0];
-    if ([times count] >= _maxRequests) return NO;
-    [times addObject:now];
-    return YES;
+static void SendPartFrom(NSArray *parts, NSUInteger index, OCPartSender send) {
+    if (index >= [parts count]) return;
+    send([parts objectAtIndex:index], ^{ SendPartFrom(parts, index + 1, send); });
 }
-- (void)reset { [_buckets removeAllObjects]; }
-@end
 
-#pragma mark - Auto Reply
+void OCSendPartsInOrder(NSArray *parts, OCPartSender send) {
+    /* each request opens its own connection, so parts sent together can arrive in any order */
+    SendPartFrom(parts, 0, [[send copy] autorelease]);
+}
 
-@implementation OCAutoReply
-- (instancetype)init {
-    if ((self = [super init])) { _rules = [[NSMutableArray alloc] init]; }
-    return self;
-}
-- (void)dealloc { [_rules release]; [super dealloc]; }
-
-- (void)addRule:(NSString *)pattern response:(NSString *)response {
-    [self addRule:pattern response:response channelId:nil];
-}
-- (void)addRule:(NSString *)pattern response:(NSString *)response channelId:(NSString *)channelId {
-    [_rules addObject:@{@"pattern": pattern, @"response": response,
-                         @"channelId": channelId ?: [NSNull null]}];
-}
-- (NSString *)autoReplyForMessage:(OCChannelMessage *)message {
-    for (NSDictionary *rule in _rules) {
-        id chFilter = [rule objectForKey:@"channelId"];
-        if (chFilter && chFilter != [NSNull null] &&
-            ![chFilter isEqualToString:message.channelId]) continue;
-        NSString *pattern = [rule objectForKey:@"pattern"];
-        NSRange r = [message.text rangeOfString:pattern options:NSCaseInsensitiveSearch];
-        if (r.location != NSNotFound) return [rule objectForKey:@"response"];
+NSArray *OCSplitText(NSString *text, NSUInteger maxChars) {
+    NSMutableArray *parts = [NSMutableArray array];
+    if (maxChars == 0) maxChars = 1;
+    NSString *rest = text ?: @"";
+    while ([rest length] > maxChars) {
+        NSRange window = NSMakeRange(0, maxChars);
+        NSRange cut = [rest rangeOfString:@"\n" options:NSBackwardsSearch range:window];
+        if (cut.location == NSNotFound || cut.location < maxChars / 2)
+            cut = [rest rangeOfString:@" " options:NSBackwardsSearch range:window];
+        NSUInteger at = (cut.location == NSNotFound || cut.location == 0) ? maxChars : cut.location;
+        /* never split a surrogate pair */
+        at = [rest rangeOfComposedCharacterSequenceAtIndex:at].location ?: at;
+        [parts addObject:[rest substringToIndex:at]];
+        rest = [[rest substringFromIndex:at] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     }
-    return nil;
+    if ([rest length]) [parts addObject:rest];
+    return parts;
 }
-@end
 
-#pragma mark - Presence Manager
-
-@interface OCPresenceManager () {
-    NSMutableDictionary *_users; /* "channelId:userId" -> {name, channel, since} */
-}
-@end
-
-@implementation OCPresenceManager
-- (instancetype)init {
-    if ((self = [super init])) { _users = [[NSMutableDictionary alloc] init]; }
-    return self;
-}
-- (void)dealloc { [_users release]; [super dealloc]; }
-
-- (void)setOnline:(NSString *)userId channel:(NSString *)channelId name:(NSString *)name {
-    NSString *key = [NSString stringWithFormat:@"%@:%@", channelId, userId];
-    [_users setObject:@{@"userId": userId, @"channel": channelId,
-                         @"name": name ?: userId,
-                         @"since": [NSDate date]} forKey:key];
-}
-- (void)setOffline:(NSString *)userId channel:(NSString *)channelId {
-    [_users removeObjectForKey:[NSString stringWithFormat:@"%@:%@", channelId, userId]];
-}
-- (NSArray *)onlineUsers { return [_users allValues]; }
-- (NSArray *)onlineUsersForChannel:(NSString *)channelId {
-    NSMutableArray *a = [NSMutableArray array];
-    for (NSDictionary *u in [_users allValues]) {
-        if ([[u objectForKey:@"channel"] isEqualToString:channelId]) [a addObject:u];
+NSArray *OCListFromString(NSString *value) {
+    if (![value isKindOfClass:[NSString class]]) return @[];
+    NSMutableArray *out = [NSMutableArray array];
+    NSCharacterSet *seps = [NSCharacterSet characterSetWithCharactersInString:@", \n\t;"];
+    for (NSString *item in [value componentsSeparatedByCharactersInSet:seps]) {
+        if ([item length]) [out addObject:item];
     }
-    return a;
+    return out;
 }
-- (BOOL)isOnline:(NSString *)userId {
-    for (NSString *key in _users) {
-        if ([key hasSuffix:[NSString stringWithFormat:@":%@", userId]]) return YES;
-    }
-    return NO;
-}
-- (NSDictionary *)presenceSnapshot { return [[_users copy] autorelease]; }
-@end
-
-#pragma mark - Approval Manager
-
-@implementation OCApprovalManager
-- (instancetype)init {
-    if ((self = [super init])) {
-        _autoApproveReadOnly = YES;
-        _trustedTools = [[NSMutableSet alloc] initWithObjects:
-            @"get_datetime", @"device_info", @"calculate", @"http_fetch", nil];
-    }
-    return self;
-}
-- (void)dealloc { [_trustedTools release]; [super dealloc]; }
-
-- (BOOL)requiresApproval:(NSString *)toolName {
-    return ![_trustedTools containsObject:toolName];
-}
-
-- (void)requestApproval:(NSString *)toolName params:(NSDictionary *)params
-             sessionKey:(NSString *)sessionKey completion:(void(^)(BOOL))completion {
-    if (![self requiresApproval:toolName]) { completion(YES); return; }
-    if (_delegate) {
-        NSString *desc = [NSString stringWithFormat:@"Tool: %@\nParams: %@", toolName, params];
-        [_delegate approvalManager:self requestApproval:desc forAction:toolName
-                        sessionKey:sessionKey completion:completion];
-    } else {
-        completion(YES); /* No delegate = auto-approve */
-    }
-}
-@end
-
-#pragma mark - Device Pairing
-
-@interface OCDevicePairing () {
-    NSMutableArray *_paired;
-    NSString *_currentCode;
-    NSString *_bootstrapToken;
-}
-@end
-
-@implementation OCDevicePairing
-@synthesize pairedDevices = _paired;
-@synthesize pairingCode = _currentCode;
-@synthesize bootstrapToken = _bootstrapToken;
-
-- (instancetype)init {
-    if ((self = [super init])) {
-        _paired = [[NSMutableArray alloc] init];
-        _bootstrapToken = [[self _uuid] retain];
-    }
-    return self;
-}
-- (void)dealloc {
-    [_paired release]; [_currentCode release]; [_bootstrapToken release];
-    [super dealloc];
-}
-
-- (NSString *)generatePairingCode {
-    [_currentCode release];
-    _currentCode = [[NSString stringWithFormat:@"%06u", arc4random_uniform(1000000)] retain];
-    return _currentCode;
-}
-
-- (NSDictionary *)generateSetupPayload:(NSString *)host port:(uint16_t)port useTLS:(BOOL)tls {
-    return @{
-        @"host": host ?: @"",
-        @"port": @(port),
-        @"tls": @(tls),
-        @"bootstrapToken": _bootstrapToken ?: @"",
-        @"code": _currentCode ?: @""
-    };
-}
-
-- (BOOL)validatePairingCode:(NSString *)code {
-    return _currentCode && [_currentCode isEqualToString:code];
-}
-
-- (void)addPairedDevice:(NSDictionary *)deviceInfo {
-    [_paired addObject:deviceInfo];
-}
-- (void)removePairedDevice:(NSString *)deviceId {
-    for (NSUInteger i = 0; i < [_paired count]; i++) {
-        if ([[[_paired objectAtIndex:i] objectForKey:@"id"] isEqualToString:deviceId]) {
-            [_paired removeObjectAtIndex:i]; return;
-        }
-    }
-}
-
-- (NSString *)_uuid {
-    CFUUIDRef u = CFUUIDCreate(kCFAllocatorDefault);
-    NSString *s = (NSString *)CFUUIDCreateString(kCFAllocatorDefault, u);
-    CFRelease(u);
-    return [s autorelease];
-}
-@end

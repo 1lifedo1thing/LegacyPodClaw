@@ -95,9 +95,16 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
     payloadLength = 0;
     payloadRead = 0;
     memset(maskKey, 0, 4);
+    /* the parser owns the payload; a delivered message holds its own reference */
+    [payload release];
     payload = nil;
     headerBytesRead = 0;
     memset(headerBuffer, 0, 8);
+}
+
+- (void)dealloc {
+    [payload release];
+    [super dealloc];
 }
 
 @end
@@ -147,7 +154,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
 
 - (instancetype)initWithURL:(NSURL *)url protocols:(NSArray *)protocols {
     if ((self = [super init])) {
-        _url = url;
+        _url = [url retain];
         _requestedProtocols = [protocols copy];
         _readyState = OCWSReadyStateClosed;
         _maxFrameSize = kDefaultMaxFrameSize;
@@ -177,6 +184,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
     [_socketQueue release];
     [_delegateQueue release];
     [_lastPongReceived release];
+    [_expectedAcceptKey release];
     [super dealloc];
 }
 
@@ -362,6 +370,7 @@ typedef NS_ENUM(NSUInteger, OCWSParserState) {
     uint8_t sha1[CC_SHA1_DIGEST_LENGTH];
     CC_SHA1([acceptData bytes], (CC_LONG)[acceptData length], sha1);
     NSData *sha1Data = [NSData dataWithBytes:sha1 length:CC_SHA1_DIGEST_LENGTH];
+    [_expectedAcceptKey release];
     _expectedAcceptKey = [OCBase64Encode(sha1Data) retain];
 
     /* Build HTTP request */

@@ -17,6 +17,8 @@ The home-button overlay and the Notification Center widget have no tools.
 
 A risky tool shows the **Allow Tool?** alert before it runs. The alert shows:
 
+{{< screenshot src="img/screens/tool-approval.png" caption="The Allow Tool? alert for a bash call" >}}
+
 - Who asked: the assistant, a chat channel message or a remote gateway client.
 - The tool name.
 - The command, path and URL in full. Runs of spaces and control characters are made visible.
@@ -88,7 +90,11 @@ These calls also need approval:
 | `create_reminder`, `complete_reminder`, `delete_reminder` | Changes a reminder through EventKit |
 | `list_reminders`, `list_reminder_lists`, `create_reminder_list` | Reads reminders and lists, or makes a list |
 
+{{< screenshot src="img/screens/notes.png" caption="A note that the create_note tool made, in Notes" >}}
+
 The first Reminders tool call asks for Reminders access. If you refuse, allow it in **Settings > Privacy > Reminders**.
+
+{{< screenshot src="img/screens/reminders.png" caption="A reminder that the create_reminder tool made, in Reminders" >}}
 
 ### Messages
 

@@ -8,18 +8,22 @@ weight: 3
 
 After you install the package and set an API key, use one of these entry points:
 
+{{< screenshot src="img/screens/home-screen.png" caption="The PodClaw icon on the home screen" >}}
+
 | Action | Result |
 |---|---|
 | Hold the home button | The overlay opens. It replaces Voice Control, or Siri on the iPhone 4S. |
 | Swipe left from the first home screen page | The dashboard opens in place of Spotlight |
 | Pull down Notification Center | The quick-ask widget shows |
-| Tap the LegacyPodClaw icon | The full app opens |
+| Tap the **PodClaw** icon | The full app opens |
 
 See [Gestures and Entry Points](/guide/gestures/) for all entry points.
 
 ## The overlay
 
 The overlay is a quick text chat.
+
+{{< screenshot src="img/screens/overlay.png" caption="The overlay after a home-button hold" >}}
 
 1. Hold the home button. The overlay opens.
 2. Type a question and tap **Send**. The reply streams into the overlay.
@@ -30,6 +34,8 @@ The overlay has no tools. It always uses Anthropic. It keeps the last 10 message
 ## The app
 
 The app has the full chat with tools.
+
+{{< screenshot src="img/screens/chat.png" caption="A streamed reply in the app" >}}
 
 1. Open the app.
 2. Tap the gear button and set a provider and its API key. See [Configuration](/getting-started/configuration/).

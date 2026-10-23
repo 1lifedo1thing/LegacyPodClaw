@@ -77,6 +77,8 @@ With **Self-Signed Certs** on and no fingerprint, the app refuses the connection
 | Gateway Server | Access Token | Shows, copies or regenerates the access token |
 | (no title) | Connect to Gateway, Reset All Settings | Connects or disconnects. Resets all settings and deletes all keys and tokens. |
 
+{{< screenshot src="img/screens/settings.png" caption="The app's Settings screen" >}}
+
 ### Settings app: Settings > LegacyPodClaw
 
 | Section | Setting | What it does |
@@ -90,6 +92,8 @@ With **Self-Signed Certs** on and no fingerprint, the app refuses the connection
 | Configuration | Diagnostics | Shows fixed information about the memory budget and the frameworks |
 | (no title) | Reset All Settings | Deletes the settings file and all keys and tokens |
 | (no title) | Developer Options | Test buttons for the banner, Messages, vibration, the lock screen label, the overlay, brightness and the badge |
+
+{{< screenshot src="img/screens/settings-app.png" caption="The LegacyPodClaw pane in the Settings app" >}}
 
 ### Settings app: Local Agent
 

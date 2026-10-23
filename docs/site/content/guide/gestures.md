@@ -30,6 +30,8 @@ Swipe left from the first home screen page. The LegacyPodClaw dashboard shows in
 - **Quick Actions:** **Ask AI**, **Open App**, **Gateway**, **Settings**, **Respring**, **Wi-Fi**, **Bright+** and **Bright-**.
 - **Device:** the battery, the brightness, the SpringBoard memory and the iOS version.
 
+{{< screenshot src="img/screens/dashboard.png" caption="The dashboard on the Spotlight page" >}}
+
 The **Gateway** button opens the app. The app then asks before it starts the gateway server.
 
 To get Spotlight back, turn off **Settings > LegacyPodClaw > Dashboard on Spotlight Page**. With the dashboard off, a Spotlight search of three or more characters also opens the overlay.
@@ -37,6 +39,8 @@ To get Spotlight back, turn off **Settings > LegacyPodClaw > Dashboard on Spotli
 ## Notification Center widget
 
 Pull down Notification Center. The LegacyPodClaw widget shows the status, a question field and an **Ask** button. The reply shows in the widget.
+
+{{< screenshot src="img/screens/nc-widget.png" caption="The quick-ask widget in Notification Center" >}}
 
 - Tap the title area to open the app.
 - The widget does not run while the device is locked with a passcode.

@@ -44,6 +44,8 @@ The overlay and the Notification Center widget use only the Anthropic key. Enter
 
 The app has a memory budget of 80 MB. If the app reaches the limit:
 
+{{< screenshot src="img/screens/diagnostics.png" caption="Diagnostics shows the memory budget and the device RAM" >}}
+
 - Close background apps.
 - Start a new session.
 - Lower **Max Context Tokens** in **Settings > LegacyPodClaw > Local Agent**.

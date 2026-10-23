@@ -13,6 +13,7 @@
 #import "ChatViewController.h"
 #import "ChatCell.h"
 #import "AppDelegate.h"
+#import "ToolDispatcher.h"
 #import "TLSClient.h"
 
 static const CGFloat kInputBarHeight = 44.0f;
@@ -527,10 +528,7 @@ static const CGFloat kTypingCellHeight = 40.0f;
     NSString *toolName = [[_pendingToolName copy] autorelease];
     NSString *toolId = [[_pendingToolId copy] autorelease];
 
-    OCToolDefinition *tool = nil;
-    for (OCToolDefinition *t in [app.localAgent registeredTools]) {
-        if ([t.name isEqualToString:toolName]) { tool = t; break; }
-    }
+    OCToolDefinition *tool = [OCToolDispatcher toolNamed:toolName inTools:[app.localAgent registeredTools]];
 
     if (!tool || !tool.handler) {
         /* Tool not found — send error back */
@@ -547,16 +545,9 @@ static const CGFloat kTypingCellHeight = 40.0f;
     }
 
     /* Execute tool */
-    tool.handler(toolInput ?: @{}, ^(id result, NSError *err) {
-        NSString *resultStr;
-        if (err) {
-            resultStr = [NSString stringWithFormat:@"Error: %@", [err localizedDescription]];
-        } else if ([result isKindOfClass:[NSString class]]) {
-            resultStr = result;
-        } else {
-            NSData *jsonData = [NSJSONSerialization dataWithJSONObject:result ?: @{} options:0 error:nil];
-            resultStr = [[[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] autorelease];
-        }
+    [[OCToolDispatcher shared] runTool:tool input:toolInput caller:OCToolCallerChat
+                            completion:^(NSString *result, NSError *err) {
+        NSString *resultStr = err ? [NSString stringWithFormat:@"Error: %@", [err localizedDescription]] : result;
 
         /* Clear tool status — the model's next response will replace it */
         if (_toolStatusStart <= [_directStreamBuf length]) {
@@ -568,7 +559,7 @@ static const CGFloat kTypingCellHeight = 40.0f;
         _toolStatusStart = 0;
 
         [self _sendToolResult:toolId result:resultStr headers:headers];
-    });
+    }];
 }
 
 /* Send tool result back to API and continue the conversation */

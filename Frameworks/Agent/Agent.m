@@ -8,6 +8,7 @@
  */
 
 #import "Agent.h"
+#import "ToolDispatcher.h"
 #import <UIKit/UIKit.h>
 
 static const NSUInteger kDefaultMaxContext  = 4096;
@@ -574,20 +575,15 @@ static const NSTimeInterval kDefaultTimeout = 120.0;
             }
         });
 
-        /* Find handler - check local tools first, then MCP servers */
-        OCToolDefinition *localTool = nil;
-        for (OCToolDefinition *t in _tools) {
-            if ([t.name isEqualToString:toolName]) {
-                localTool = t;
-                break;
-            }
-        }
+        /* local tools first, then mcp servers */
+        OCToolDefinition *localTool = [OCToolDispatcher toolNamed:toolName inTools:_tools];
 
         if (localTool && localTool.handler) {
-            localTool.handler(input, ^(id result, NSError *error) {
+            [[OCToolDispatcher shared] runTool:localTool input:input caller:OCToolCallerAgent
+                                    completion:^(NSString *result, NSError *error) {
                 [self _addToolResult:result error:error toolId:toolId toolName:toolName];
                 if (--remaining == 0) completion();
-            });
+            }];
         } else {
             /* Try MCP servers */
             BOOL found = NO;

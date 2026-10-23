@@ -42,6 +42,7 @@ LegacyPodClaw_FILES = \
 	Frameworks/Plugin/PluginSDK.m \
 	Frameworks/Tools/SystemMCP.m \
 	Frameworks/Tools/Guardrails.m \
+	Frameworks/Tools/ToolDispatcher.m \
 	Frameworks/Tools/SkillRegistry.m \
 	Frameworks/Tools/NotesReminders.m \
 	Frameworks/Tools/MusicDownloader.m \

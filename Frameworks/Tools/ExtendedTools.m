@@ -7,6 +7,9 @@
  */
 
 #import "ExtendedTools.h"
+#import "ToolInputCheck.h"
+#import "Guardrails.h"
+#import "HTTPFetch.h"
 #import <UIKit/UIKit.h>
 #import <sys/sysctl.h>
 #import <sys/mount.h>
@@ -45,17 +48,6 @@ static OCStore *_memoryStore = nil;
 #pragma mark - Bash
 
 #define BASH_OUTPUT_MAX 16384
-
-/* cut at a character boundary, so a split multi-byte sequence does not garble the whole output */
-static NSUInteger Utf8SafeLength(const uint8_t *bytes, NSUInteger length) {
-    NSUInteger i = length;
-    NSUInteger back = 0;
-    while (i > 0 && back < 4 && (bytes[i - 1] & 0xC0) == 0x80) { i--; back++; }
-    if (i == 0) return length;
-    uint8_t lead = bytes[i - 1];
-    NSUInteger need = (lead & 0x80) == 0 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
-    return (back + 1 >= need) ? length : i - 1;
-}
 
 /* every call is confirmed by the user through OCToolDispatcher, so there is no denylist */
 static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
@@ -108,9 +100,9 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         ssize_t n = read(out[0], buf, sizeof(buf));
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) break;
-        if ([data length] < BASH_OUTPUT_MAX)
-            [data appendBytes:buf length:MIN((NSUInteger)n, BASH_OUTPUT_MAX - [data length])];
-        else truncated = YES;
+        NSUInteger room = BASH_OUTPUT_MAX - [data length];
+        if ((NSUInteger)n > room) truncated = YES;
+        if (room > 0) [data appendBytes:buf length:MIN((NSUInteger)n, room)];
     }
     close(out[0]);
 
@@ -128,7 +120,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
     }
 
-    if (truncated) [data setLength:Utf8SafeLength([data bytes], [data length])];
+    if (truncated) [data setLength:OCUtf8SafeLength([data bytes], [data length])];
     NSString *output = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease]
         ?: [[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] autorelease];
     if (truncated) output = [output stringByAppendingString:@"\n[output truncated]"];
@@ -200,6 +192,13 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSString *path = [p objectForKey:@"path"];
         NSString *content = [p objectForKey:@"content"];
+        NSUInteger bytes = [content lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        if (bytes > [[OCGuardrails shared] maxFileWriteSize]) {
+            cb(nil, [NSError errorWithDomain:@"OCTools" code:1 userInfo:@{NSLocalizedDescriptionKey:
+                [NSString stringWithFormat:@"content is %lu bytes; the limit is %lu", (unsigned long)bytes,
+                 (unsigned long)[[OCGuardrails shared] maxFileWriteSize]]}]);
+            return;
+        }
         NSError *e = nil;
         [content writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&e];
         cb(e ? [e localizedDescription] : [NSString stringWithFormat:@"Written %lu bytes to %@",
@@ -287,13 +286,12 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         @"required": @[@"query"]};
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSString *q = [p objectForKey:@"query"];
-        NSString *encoded = [q stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        /* escape & = + too, or the query could add its own parameters */
+        NSString *encoded = [(NSString *)CFURLCreateStringByAddingPercentEscapes(NULL, (CFStringRef)q, NULL,
+            CFSTR("!*'();:@&=+$,/?#[]"), kCFStringEncodingUTF8) autorelease];
         NSString *url = [NSString stringWithFormat:
             @"https://html.duckduckgo.com/html/?q=%@", encoded];
-        NSURLRequest *req = [NSURLRequest requestWithURL:[NSURL URLWithString:url]
-            cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:15];
-        [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-            completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
+        CPFetch(url, @"GET", nil, nil, 15, ^(NSData *d, NSInteger status, NSError *e) {
             if (e) { cb(nil, e); return; }
             NSString *html = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] autorelease];
             /* Extract result snippets - simple parsing */
@@ -321,7 +319,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
             }
             cb([results count] > 0 ? [results componentsJoinedByString:@"\n\n"]
                                     : @"No results found", nil);
-        }];
+        });
     };
     return t;
 }

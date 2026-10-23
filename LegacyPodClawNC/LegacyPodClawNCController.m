@@ -9,6 +9,8 @@
 
 #import "SecretStore.h"
 #import "LegacyPodClawNCController.h"
+#import <objc/runtime.h>
+#import <objc/message.h>
 
 #define PREFS_PATH @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
 #define WIDGET_HEIGHT 72.0f
@@ -26,10 +28,29 @@
     BOOL _isProcessing;
     NSURLConnection *_conn;
     NSMutableData *_respData;
-    NSMutableString *_sseBuf;
+    NSMutableData *_sseBuf;
     NSMutableString *_streamBuf;
+    NSInteger _status;
 }
 @end
+
+/* notification center opens over the lock screen, so the widget must not run or show answers there */
+static BOOL LPCLockedWithPasscode(void) {
+    id away = [objc_getClass("SBAwayController") performSelector:@selector(sharedAwayController)];
+    BOOL locked = [away respondsToSelector:@selector(isLocked)] && ((BOOL (*)(id, SEL))objc_msgSend)(away, @selector(isLocked));
+    if (!locked) return NO;
+    id lock = [objc_getClass("SBDeviceLockController") performSelector:@selector(sharedController)];
+    /* assume a passcode when the class is missing, so we never skip the check */
+    return ![lock respondsToSelector:@selector(isPasswordProtected)]
+        || ((BOOL (*)(id, SEL))objc_msgSend)(lock, @selector(isPasswordProtected));
+}
+
+/* the generation five claude models think by default and accept an effort level */
+static BOOL LPCModelAlwaysThinks(NSString *model) {
+    for (NSString *family in @[@"claude-opus-5", @"claude-sonnet-5", @"claude-haiku-5", @"claude-fable-5"])
+        if ([model hasPrefix:family]) return YES;
+    return NO;
+}
 
 @implementation LegacyPodClawNCController
 
@@ -136,6 +157,13 @@
 
 - (void)viewWillAppear {
     [self _refreshStatus];
+    if (LPCLockedWithPasscode()) {
+        _responseLabel.text = @"";
+        _quickInput.enabled = NO;
+        _quickInput.placeholder = @"Unlock to ask";
+    } else {
+        _quickInput.enabled = YES;
+    }
 }
 
 - (void)viewDidAppear {
@@ -179,6 +207,10 @@
     NSString *q = [_quickInput.text stringByTrimmingCharactersInSet:
         [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if ([q length] == 0 || _isProcessing) return;
+    if (LPCLockedWithPasscode()) {
+        [self _showResponse:@"Unlock the device to ask."];
+        return;
+    }
 
     [_quickInput resignFirstResponder];
     [self _sendQuery:q];
@@ -192,7 +224,10 @@
 - (void)_sendQuery:(NSString *)query {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *apiKey = [CPSecretStore secretForKey:@"apiKey"];
-    NSString *model = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514";
+    /* the widget talks to anthropic only, so another provider's model id would be rejected */
+    NSString *provider = [prefs objectForKey:@"modelProvider"];
+    NSString *model = [prefs objectForKey:@"modelId"];
+    if ((provider && ![provider isEqualToString:@"anthropic"]) || [model length] == 0) model = @"claude-sonnet-5-5";
 
     if (!apiKey || [apiKey length] == 0) {
         [self _showResponse:@"Set an API key in Settings > LegacyPodClaw"];
@@ -206,7 +241,8 @@
     [_streamBuf release];
     _streamBuf = [[NSMutableString alloc] init];
     [_sseBuf release];
-    _sseBuf = [[NSMutableString alloc] init];
+    _sseBuf = [[NSMutableData alloc] init];
+    _status = 0;
 
     /* Expand to show response */
     [self _expand];
@@ -223,14 +259,19 @@
     [req setValue:apiKey forHTTPHeaderField:@"x-api-key"];
     [req setValue:@"text/event-stream" forHTTPHeaderField:@"Accept"];
 
-    NSDictionary *body = @{
+    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithDictionary:@{
         @"model": model,
         @"max_tokens": @(256),
         @"stream": @YES,
         @"system": @"You are Molty, a concise AI in a Notification Center widget. "
                     "Maximum 2-3 sentences. Be extremely brief.",
         @"messages": @[@{@"role": @"user", @"content": query}]
-    };
+    }];
+    /* current models always think and pay for it from max_tokens, so give room and ask for little thought */
+    if (LPCModelAlwaysThinks(model)) {
+        [body setObject:@(2048) forKey:@"max_tokens"];
+        [body setObject:@{@"effort": @"low"} forKey:@"output_config"];
+    }
     [req setHTTPBody:[NSJSONSerialization dataWithJSONObject:body options:0 error:nil]];
 
     [_respData release];
@@ -241,14 +282,23 @@
 
 #pragma mark - Streaming
 
-- (void)connection:(NSURLConnection *)c didReceiveData:(NSData *)data {
-    NSString *chunk = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (!chunk) { [chunk release]; return; }
-    [_sseBuf appendString:chunk];
-    [chunk release];
+- (void)connection:(NSURLConnection *)c didReceiveResponse:(NSURLResponse *)response {
+    _status = [response isKindOfClass:[NSHTTPURLResponse class]] ? [(NSHTTPURLResponse *)response statusCode] : 0;
+}
 
-    NSArray *lines = [_sseBuf componentsSeparatedByString:@"\n"];
-    [_sseBuf setString:[lines lastObject] ?: @""];
+- (void)connection:(NSURLConnection *)c didReceiveData:(NSData *)data {
+    /* an error body is json, not events */
+    if (_status >= 400) { [_respData appendData:data]; return; }
+    /* decode only whole lines, so a multi-byte character split across chunks is not lost */
+    [_sseBuf appendData:data];
+    const uint8_t *bytes = [_sseBuf bytes];
+    NSUInteger end = [_sseBuf length];
+    while (end > 0 && bytes[end - 1] != '\n') end--;
+    if (end == 0) return;
+    NSString *whole = [[[NSString alloc] initWithBytes:bytes length:end encoding:NSUTF8StringEncoding] autorelease];
+    [_sseBuf replaceBytesInRange:NSMakeRange(0, end) withBytes:NULL length:0];
+    if (!whole) return;
+    NSArray *lines = [whole componentsSeparatedByString:@"\n"];
 
     for (NSUInteger i = 0; i < [lines count] - 1; i++) {
         NSString *line = [lines objectAtIndex:i];
@@ -272,6 +322,13 @@
 }
 
 - (void)connectionDidFinishLoading:(NSURLConnection *)c {
+    if (_status >= 400) {
+        NSDictionary *body = [NSJSONSerialization JSONObjectWithData:_respData options:0 error:nil];
+        id err = [body isKindOfClass:[NSDictionary class]] ? [body objectForKey:@"error"] : nil;
+        NSString *message = [err isKindOfClass:[NSDictionary class]] ? [err objectForKey:@"message"] : nil;
+        [self _showResponse:[NSString stringWithFormat:@"Error %ld: %@", (long)_status, message ?: @"request failed"]];
+        return;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         _isProcessing = NO;
         _askButton.hidden = NO;

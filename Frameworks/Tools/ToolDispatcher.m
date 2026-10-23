@@ -5,14 +5,12 @@
 
 #import "ToolDispatcher.h"
 #import "Guardrails.h"
+#import "ToolInputCheck.h"
 #import <UIKit/UIKit.h>
 
 #define TOOL_DEFAULT_TIMEOUT 30.0
 #define CONFIRM_TIMEOUT 60.0
 #define RESULT_MAX_CHARS 16384
-#define SUMMARY_MAX_CHARS 400
-/* a key field longer than this cannot be shown in an alert, so the call is refused */
-#define KEY_FIELD_MAX_CHARS 1500
 
 static NSString *const OCToolErrorDomain = @"OCToolDispatcher";
 
@@ -94,31 +92,6 @@ static NSError *ToolError(NSString *message) {
     return nil;
 }
 
-static BOOL ValueMatchesType(id value, NSString *type) {
-    if (!type) return YES;
-    if ([type isEqualToString:@"string"]) return [value isKindOfClass:[NSString class]];
-    if ([type isEqualToString:@"object"]) return [value isKindOfClass:[NSDictionary class]];
-    if ([type isEqualToString:@"array"]) return [value isKindOfClass:[NSArray class]];
-    if ([type isEqualToString:@"number"] || [type isEqualToString:@"integer"] || [type isEqualToString:@"boolean"])
-        return [value isKindOfClass:[NSNumber class]];
-    return YES;
-}
-
-static NSString *SchemaProblem(NSDictionary *schema, NSDictionary *input) {
-    NSDictionary *props = [schema objectForKey:@"properties"];
-    for (NSString *key in [schema objectForKey:@"required"]) {
-        id value = [input objectForKey:key];
-        if (!value || value == [NSNull null]) return [NSString stringWithFormat:@"missing required parameter '%@'", key];
-    }
-    for (NSString *key in input) {
-        NSString *type = [[props objectForKey:key] objectForKey:@"type"];
-        if (![type isKindOfClass:[NSString class]]) continue;
-        if (!ValueMatchesType([input objectForKey:key], type))
-            return [NSString stringWithFormat:@"parameter '%@' must be of type %@", key, type];
-    }
-    return nil;
-}
-
 /* file tools whose path argument the guardrails must see first */
 static BOOL PathCheckForTool(NSString *name, OCFileOp *op) {
     static NSDictionary *ops;
@@ -132,50 +105,6 @@ static BOOL PathCheckForTool(NSString *name, OCFileOp *op) {
     if (!n) return NO;
     *op = (OCFileOp)[n unsignedIntegerValue];
     return YES;
-}
-
-/* fields that decide what a call does; the user must see them whole */
-static NSArray *KeyFields(void) {
-    return @[@"command", @"path", @"url", @"to", @"recipient", @"bundle_id", @"query"];
-}
-
-/* make spaces, tabs and line breaks visible, so padding cannot hide the rest of a command */
-static NSString *Visible(NSString *value) {
-    NSMutableString *out = [NSMutableString stringWithCapacity:[value length]];
-    NSUInteger spaces = 0;
-    for (NSUInteger i = 0; i < [value length]; i++) {
-        unichar c = [value characterAtIndex:i];
-        if (c == ' ') { spaces++; continue; }
-        if (spaces > 1) [out appendFormat:@"[%lu spaces]", (unsigned long)spaces];
-        else if (spaces == 1) [out appendString:@" "];
-        spaces = 0;
-        if (c == '\n') [out appendString:@"⏎\n"];
-        else if (c == '\t') [out appendString:@"[tab]"];
-        else if (c < 0x20 || c == 0x7f) [out appendFormat:@"[0x%02x]", c];
-        else [out appendFormat:@"%C", c];
-    }
-    if (spaces > 1) [out appendFormat:@"[%lu spaces]", (unsigned long)spaces];
-    else if (spaces == 1) [out appendString:@"[space]"];
-    return out;
-}
-
-static NSString *KeyFieldsText(NSDictionary *input, BOOL *tooLong) {
-    NSMutableString *text = [NSMutableString string];
-    for (NSString *key in KeyFields()) {
-        id value = [input objectForKey:key];
-        if (!value) continue;
-        NSString *str = [value isKindOfClass:[NSString class]] ? value : [value description];
-        if ([str length] > KEY_FIELD_MAX_CHARS) { *tooLong = YES; return nil; }
-        [text appendFormat:@"%@: %@\n", key, Visible(str)];
-    }
-    return text;
-}
-
-static NSString *InputSummary(NSDictionary *input) {
-    NSData *json = [NSJSONSerialization dataWithJSONObject:input options:0 error:nil];
-    NSString *s = json ? [[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] autorelease] : @"{}";
-    if ([s length] > SUMMARY_MAX_CHARS) s = [[s substringToIndex:SUMMARY_MAX_CHARS] stringByAppendingString:@"…"];
-    return s;
 }
 
 static NSString *ResultString(id result) {
@@ -194,6 +123,7 @@ static NSString *ResultString(id result) {
 static NSString *CallerText(OCToolCaller caller) {
     switch (caller) {
         case OCToolCallerRemote: return @"A remote gateway client";
+        case OCToolCallerChannel: return @"A chat channel message";
         case OCToolCallerAgent: return @"The background agent";
         default: return @"The assistant";
     }
@@ -216,10 +146,10 @@ static NSString *CallerText(OCToolCaller caller) {
         return;
     }
 
-    NSString *problem = SchemaProblem(tool.inputSchema, input);
+    NSString *problem = OCToolSchemaProblem(tool.inputSchema, input);
     if (problem) { completion(nil, ToolError(problem)); return; }
 
-    BOOL confirm = tool.requiresConfirmation;
+    BOOL confirm = tool.requiresConfirmation || caller == OCToolCallerChannel;
     NSString *reason = nil;
     OCFileOp op;
     if (PathCheckForTool(tool.name, &op)) {
@@ -236,16 +166,16 @@ static NSString *CallerText(OCToolCaller caller) {
     if (!confirm) { run(); return; }
 
     BOOL tooLong = NO;
-    NSString *keyText = KeyFieldsText(input, &tooLong);
+    NSString *keyText = OCToolApprovalText(input, &tooLong);
     if (tooLong) {
         completion(nil, ToolError(@"a command or path is too long to show for approval, so the call was refused"));
         return;
     }
     NSMutableDictionary *rest = [[input mutableCopy] autorelease];
-    [rest removeObjectsForKeys:KeyFields()];
+    [rest removeObjectsForKeys:OCToolApprovalFields()];
     NSMutableString *message = [NSMutableString stringWithFormat:@"%@ wants to run \"%@\".\n\n%@",
                                 CallerText(caller), tool.name, keyText];
-    if ([rest count]) [message appendFormat:@"\nOther input: %@", InputSummary(rest)];
+    if ([rest count]) [message appendFormat:@"\nOther input:\n%@", OCToolOtherInputText(rest)];
     if (reason) [message appendFormat:@"\n\n%@", reason];
     _OCToolConfirmation *c = [[_OCToolConfirmation alloc] initWithTitle:@"Allow Tool?" message:message
         decision:^(BOOL allowed) {

@@ -2,6 +2,11 @@
 
 static const NSUInteger kDefaultMaxMessageSize = 256 * 1024;
 static const NSUInteger kDefaultMaxPendingWrite = 2 * 1024 * 1024;
+
+/* rfc 6455 7.4: 1004-1006, 1015 and unassigned codes must not go on the wire, so answer them with 1002 */
+static uint16_t WSEchoCode(uint16_t c) {
+    return ((c >= 1000 && c <= 1003) || (c >= 1007 && c <= 1014) || (c >= 3000 && c <= 4999)) ? c : 1002;
+}
 enum { kReadChunk = 4096 };
 
 enum {
@@ -305,7 +310,7 @@ enum {
             /* rfc 6455 5.5.1: echo the peer's status code; a close with no code gets a close with no code */
             if ([payload length] >= 2) {
                 const uint8_t *b = [payload bytes];
-                [self closeWithCode:(uint16_t)((b[0] << 8) | b[1]) reason:nil];
+                [self closeWithCode:WSEchoCode((uint16_t)((b[0] << 8) | b[1])) reason:nil];
             } else {
                 [self _sendFrame:kOpClose payload:[NSData data]];
                 [self _beginClosing];

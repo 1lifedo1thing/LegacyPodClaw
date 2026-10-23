@@ -60,7 +60,17 @@ typedef NS_ENUM(NSUInteger, OCAgentMessageRole) {
     OCAgentRoleTool
 };
 
-@interface OCAgentMessage : NSObject
+/* the fields the provider request builders read, so springboard can send turns without linking the agent */
+@protocol OCProviderMessage <NSObject>
+@property (nonatomic, readonly) OCAgentMessageRole role;
+@property (nonatomic, readonly, copy) NSString *content;
+@property (nonatomic, readonly, copy) NSString *toolCallId;
+@property (nonatomic, readonly) BOOL isError;
+@property (nonatomic, readonly, retain) NSArray *toolCalls;
+@property (nonatomic, readonly, retain) NSArray *rawContent;
+@end
+
+@interface OCAgentMessage : NSObject <OCProviderMessage>
 @property (nonatomic, assign) OCAgentMessageRole role;
 @property (nonatomic, copy) NSString *content;
 @property (nonatomic, copy) NSString *toolName;

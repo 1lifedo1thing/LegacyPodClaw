@@ -20,6 +20,7 @@
 #import "TLSClient.h"
 #import "SecretStore.h"
 #import "SharedFiles.h"
+#import "QuickAsk.h"
 #import <objc/message.h>
 
 
@@ -143,36 +144,21 @@ static void _persistOverlayMessage(NSString *content, int role) {
 
 /* the status shows whether the app's chosen provider is set up, not only the anthropic key */
 static BOOL CPAgentConfigured(NSDictionary *prefs) {
-    NSString *provider = [prefs objectForKey:@"modelProvider"];
-    if (![provider isKindOfClass:[NSString class]] || [provider length] == 0) provider = @"anthropic";
-    if ([provider isEqualToString:@"ollama"] || [provider isEqualToString:@"custom"]) {
-        NSString *base = [prefs objectForKey:[provider stringByAppendingString:@"BaseURL"]];
-        return [base isKindOfClass:[NSString class]] && [base length] > 0;
-    }
-    NSString *secret = [provider isEqualToString:@"anthropic"] ? @"apiKey" : [provider stringByAppendingString:@"ApiKey"];
-    return [[CPSecretStore secretForKey:secret] length] > 0;
+    return [OCQuickAsk isConfigured:prefs];
 }
 
-/* the generation five claude models think by default and accept an effort level */
-static BOOL LPCModelAlwaysThinks(NSString *model) {
-    for (NSString *family in @[@"claude-opus-5", @"claude-sonnet-5", @"claude-haiku-5", @"claude-fable-5"])
-        if ([model hasPrefix:family]) return YES;
-    return NO;
-}
-
-/* the overlay talks to anthropic only, so another provider's model id would be rejected */
-static NSString *LPCAnthropicModel(NSDictionary *prefs) {
-    NSString *provider = [prefs objectForKey:@"modelProvider"];
-    NSString *model = [prefs objectForKey:@"modelId"];
-    if ((provider && ![provider isEqualToString:@"anthropic"]) || [model length] == 0) return @"claude-sonnet-5-5";
-    return model;
+/* the dashboard names the model the overlay will use, with its provider */
+static NSString *LPCModelLine(NSDictionary *prefs) {
+    NSString *model = [OCQuickAsk modelForPrefs:prefs];
+    NSString *provider = [OCQuickAsk providerForPrefs:prefs].displayName;
+    return [NSString stringWithFormat:@"Model: %@ \u00b7 %@", [model length] ? model : @"not set", provider];
 }
 #define PANEL_HEIGHT 290.0f
 #define ANIM_DURATION 0.28f
 
 #pragma mark - LegacyPodClaw Overlay Panel
 
-@interface CPAssistantPanel : UIView <UITextFieldDelegate, NSURLConnectionDataDelegate> {
+@interface CPAssistantPanel : UIView <UITextFieldDelegate> {
     UIView *_dimView;
     UIView *_panel;
     UITextField *_inputField;
@@ -183,7 +169,7 @@ static NSString *LPCAnthropicModel(NSDictionary *prefs) {
     BOOL _isProcessing;
     NSMutableArray *_conversationHistory; /* Array of {role, content} dicts */
     NSMutableString *_streamBuf;
-    NSURLConnection *_conn;
+    OCQuickAsk *_ask;
 }
 @property (nonatomic, assign) BOOL isVisible;
 - (void)show;
@@ -209,7 +195,8 @@ static NSString *LPCAnthropicModel(NSDictionary *prefs) {
 
         /* Panel - slides up from bottom, rounded top corners */
         _panel = [[UIView alloc] initWithFrame:CGRectMake(0, h, w, PANEL_HEIGHT)];
-        _panel.backgroundColor = [UIColor colorWithRed:0.06f green:0.06f blue:0.10f alpha:0.96f];
+        /* opaque, or the app underneath shows through the reply text */
+        _panel.backgroundColor = [UIColor colorWithRed:0.06f green:0.06f blue:0.10f alpha:1.0f];
         CAShapeLayer *mask = [CAShapeLayer layer];
         mask.path = [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, w, PANEL_HEIGHT)
             byRoundingCorners:(UIRectCornerTopLeft | UIRectCornerTopRight)
@@ -247,6 +234,7 @@ static NSString *LPCAnthropicModel(NSDictionary *prefs) {
         _responseArea.font = [UIFont systemFontOfSize:14.5f];
         _responseArea.editable = NO;
         _responseArea.text = @"Hold home button to ask me anything.";
+        _responseArea.autoresizingMask = UIViewAutoresizingFlexibleHeight;
         [_panel addSubview:_responseArea];
 
         /* Typing dots */
@@ -264,6 +252,7 @@ static NSString *LPCAnthropicModel(NSDictionary *prefs) {
         /* Input bar */
         UIView *bar = [[[UIView alloc] initWithFrame:CGRectMake(0, PANEL_HEIGHT - 44, w, 44)] autorelease];
         bar.backgroundColor = [UIColor colorWithRed:0.10f green:0.10f blue:0.14f alpha:1];
+        bar.autoresizingMask = UIViewAutoresizingFlexibleTopMargin;
         UIView *bdr = [[[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 0.5f)] autorelease];
         bdr.backgroundColor = [UIColor colorWithWhite:0.22f alpha:1];
         [bar addSubview:bdr];
@@ -320,7 +309,8 @@ static NSString *LPCAnthropicModel(NSDictionary *prefs) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_dimView release]; [_panel release]; [_inputField release];
     [_responseArea release]; [_typingDots release]; [_closeBtn release];
-    [_streamBuf release]; [_conn release];
+    [_ask cancel];
+    [_streamBuf release]; [_ask release];
     [super dealloc];
 }
 
@@ -349,7 +339,11 @@ static NSString *LPCAnthropicModel(NSDictionary *prefs) {
     /* Nuclear option: tell the entire app to end editing */
     [self.window endEditing:YES];
 
-    [_conn cancel];
+    /* a cancelled ask never calls back, so clear the busy state here */
+    [_ask cancel];
+    if (_isProcessing) [_conversationHistory removeLastObject];
+    _isProcessing = NO;
+    _typingDots.hidden = YES;
     CGFloat h = self.bounds.size.height;
 
     /* Small delay to let keyboard dismiss begin, then animate panel */
@@ -377,8 +371,10 @@ static NSString *LPCAnthropicModel(NSDictionary *prefs) {
     CGFloat kbH = [[[n userInfo] objectForKey:UIKeyboardFrameEndUserInfoKey] CGRectValue].size.height;
     NSTimeInterval dur = [[[n userInfo] objectForKey:UIKeyboardAnimationDurationUserInfoKey] doubleValue];
     CGFloat h = self.bounds.size.height;
+    /* 480 - 216 leaves less than the panel height, so shrink it below the status bar instead of pushing the header off-screen */
+    CGFloat top = MAX(h - kbH - PANEL_HEIGHT, [UIApplication sharedApplication].statusBarFrame.size.height);
     [UIView animateWithDuration:dur animations:^{
-        _panel.frame = CGRectMake(0, h - kbH - PANEL_HEIGHT, self.bounds.size.width, PANEL_HEIGHT);
+        _panel.frame = CGRectMake(0, top, self.bounds.size.width, h - kbH - top);
     }];
 }
 
@@ -423,103 +419,49 @@ static NSString *LPCAnthropicModel(NSDictionary *prefs) {
     _ensureOverlaySession();
     _persistOverlayMessage(q, 0); /* 0 = OCMessageRoleUser */
 
-    /* Get API key from secure keychain (with plist fallback) */
-    NSString *apiKey = [CPSecretStore secretForKey:@"apiKey"];
-    
-    /* Get model from prefs */
+    /* the overlay uses the provider, model, key and base url chosen in the app */
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-    NSString *model = LPCAnthropicModel(prefs);
-
-    if (!apiKey || [apiKey length] == 0) {
-        [self _showResult:@"No API key set.\n\nGo to Settings \u2192 LegacyPodClaw."]; return;
-    }
+    [_ask cancel];
+    [_ask release];
+    _ask = [[OCQuickAsk alloc] initWithPrefs:prefs];
 
     /* Add user message to conversation history */
     [_conversationHistory addObject:@{@"role": @"user", @"content": q}];
 
-    /* Trim history to last 10 messages to fit context window */
-    while ([_conversationHistory count] > 10) [_conversationHistory removeObjectAtIndex:0];
+    /* keep the last 10 turns, and start on a user turn because the apis reject a leading assistant turn */
+    while ([_conversationHistory count] > 10 ||
+           ([_conversationHistory count] > 1 && [[[_conversationHistory objectAtIndex:0] objectForKey:@"role"] isEqual:@"assistant"]))
+        [_conversationHistory removeObjectAtIndex:0];
 
-    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithDictionary:@{
-        @"model": model,
-        @"max_tokens": @(1024),
-        @"stream": @YES,
-        @"system": @"You are LegacyPodClaw (Molty), an AI assistant on a jailbroken iOS 6 device. "
-                    "You appear as a quick-access overlay. Be concise. "
-                    "You have full system access. For tasks needing tools (file ops, bash, notes, reminders, "
-                    "system control), direct the user to the LegacyPodClaw app where all tools are available. "
-                    "In this overlay you can answer questions, have conversations, and give advice.",
-        @"messages": _conversationHistory
-    }];
-    /* current models always think and pay for it from max_tokens, so give room and ask for little thought */
-    if (LPCModelAlwaysThinks(model)) {
-        [body setObject:@(4096) forKey:@"max_tokens"];
-        [body setObject:@{@"effort": @"low"} forKey:@"output_config"];
-    }
-    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-    NSDictionary *headers = @{
-        @"Content-Type": @"application/json",
-        @"Accept": @"text/event-stream",
-        @"anthropic-version": @"2023-06-01",
-        @"x-api-key": apiKey
-    };
+    NSString *system = @"You are LegacyPodClaw (Molty), an AI assistant on a jailbroken iOS 6 device. "
+        "You appear as a quick-access overlay. Be concise. "
+        "You have full system access. For tasks needing tools (file ops, bash, notes, reminders, "
+        "system control), direct the user to the LegacyPodClaw app where all tools are available. "
+        "In this overlay you can answer questions, have conversations, and give advice.";
 
-    NSMutableData *pending = [NSMutableData data];
-    [CPTLSClient streamRequest:@"https://api.anthropic.com/v1/messages" method:@"POST"
-                       headers:headers body:bodyData
-        onChunk:^(NSData *chunk) {
-            [pending appendData:chunk];
-            const char *bytes = (const char *)[pending bytes];
-            NSUInteger len = [pending length], start = 0;
-            for (NSUInteger i = 0; i < len; i++) {
-                if (bytes[i] != '\n') continue;
-                NSString *line = [[NSString alloc] initWithBytes:bytes + start length:i - start
-                                                        encoding:NSUTF8StringEncoding];
-                if (line) [self _handleSSELine:line];
-                [line release];
-                start = i + 1;
-            }
-            [pending replaceBytesInRange:NSMakeRange(0, start) withBytes:NULL length:0];
+    [_ask askWithSystem:system history:_conversationHistory maxTokens:1024
+        onText:^(NSString *delta) {
+            [_streamBuf appendString:delta];
+            _typingDots.hidden = YES;
+            _responseArea.textColor = [UIColor colorWithWhite:0.88f alpha:1];
+            _responseArea.text = _streamBuf;
         }
-        completion:^(NSData *data, NSInteger status, NSError *error) {
-            if (error || status != 200) {
+        completion:^(NSString *text, NSError *error) {
+            if (error) {
                 [_conversationHistory removeLastObject];
-                NSString *detail = error ? [error localizedDescription]
-                    : [NSString stringWithFormat:@"HTTP %ld: %@", (long)status,
-                       [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease] ?: @""];
-                [self _showResult:detail];
+                [self _showResult:[NSString stringWithFormat:@"%@\n\n%@ \u00b7 %@", [error localizedDescription],
+                                   _ask.provider.displayName, [_ask.model length] ? _ask.model : @"no model set"]];
                 return;
             }
             _isProcessing = NO;
             _typingDots.hidden = YES;
-            if ([_streamBuf length] > 0) {
-                NSString *reply = [[_streamBuf copy] autorelease];
+            NSString *reply = [_streamBuf length] ? [[_streamBuf copy] autorelease] : text;
+            if ([reply length] > 0) {
+                _responseArea.text = reply;
                 [_conversationHistory addObject:@{@"role": @"assistant", @"content": reply}];
                 _persistOverlayMessage(reply, 1); /* 1 = OCMessageRoleAssistant */
             }
         }];
-}
-
-/* runs on the main queue: CPTLSClient delivers chunks there */
-- (void)_handleSSELine:(NSString *)line {
-    if (![line hasPrefix:@"data:"]) return;
-    NSData *json = [[line substringFromIndex:5] dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary *evt = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
-    if (![evt isKindOfClass:[NSDictionary class]]) return;
-
-    NSString *type = [evt objectForKey:@"type"];
-    if ([type isEqualToString:@"content_block_delta"]) {
-        NSString *text = [[evt objectForKey:@"delta"] objectForKey:@"text"];
-        if (![text isKindOfClass:[NSString class]]) return;
-        [_streamBuf appendString:text];
-        _typingDots.hidden = YES;
-        _responseArea.textColor = [UIColor colorWithWhite:0.88f alpha:1];
-        _responseArea.text = _streamBuf;
-    } else if ([type isEqualToString:@"error"]) {
-        NSString *message = [[evt objectForKey:@"error"] objectForKey:@"message"];
-        [_streamBuf appendFormat:@"\n[%@]", message ?: @"stream error"];
-        _responseArea.text = _streamBuf;
-    }
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)tf { [self _send]; return NO; }
@@ -1342,8 +1284,7 @@ static UIView *_buildDashboard(CGRect frame) {
     [statusCard addSubview:connLabel];
 
     UILabel *modelLabel = [[[UILabel alloc] initWithFrame:CGRectMake(12, 26, w-44, 16)] autorelease];
-    modelLabel.text = [NSString stringWithFormat:@"Model: %@",
-        LPCAnthropicModel(prefs)];
+    modelLabel.text = LPCModelLine(prefs);
     modelLabel.textColor = [UIColor colorWithWhite:0.7f alpha:1];
     modelLabel.font = [UIFont systemFontOfSize:11];
     modelLabel.backgroundColor = [UIColor clearColor];

@@ -201,6 +201,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         }
         NSError *e = nil;
         [content writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&e];
+        e = OCFileError(e, path);
         cb(e ? [e localizedDescription] : [NSString stringWithFormat:@"Written %lu bytes to %@",
             (unsigned long)[content length], path], e);
     };
@@ -220,7 +221,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         NSString *path = [p objectForKey:@"path"];
         NSError *e = nil;
         NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&e];
-        if (e) { cb(nil, e); return; }
+        if (e) { cb(nil, OCFileError(e, path)); return; }
         NSString *oldText = [p objectForKey:@"old_text"];
         NSString *newText = [p objectForKey:@"new_text"];
         if ([content rangeOfString:oldText].location == NSNotFound) {
@@ -228,6 +229,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         }
         NSString *updated = [content stringByReplacingOccurrencesOfString:oldText withString:newText];
         [updated writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&e];
+        e = OCFileError(e, path);
         cb(e ? [e localizedDescription] : @"File edited successfully", e);
     };
     return t;
@@ -244,7 +246,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
         NSString *path = [p objectForKey:@"path"];
         NSError *e = nil;
         NSArray *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:&e];
-        if (e) { cb(nil, e); return; }
+        if (!items) { cb(nil, OCFileError(e, path)); return; }
         NSMutableArray *lines = [NSMutableArray array];
         for (NSString *item in items) {
             NSString *full = [path stringByAppendingPathComponent:item];
@@ -270,6 +272,7 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
         NSError *e = nil;
         [[NSFileManager defaultManager] removeItemAtPath:[p objectForKey:@"path"] error:&e];
+        e = OCFileError(e, [p objectForKey:@"path"]);
         cb(e ? [e localizedDescription] : @"Deleted", e);
     };
     return t;
@@ -291,14 +294,27 @@ static NSDictionary *RunShellCommand(NSString *cmd, NSTimeInterval timeout) {
             CFSTR("!*'();:@&=+$,/?#[]"), kCFStringEncodingUTF8) autorelease];
         NSString *url = [NSString stringWithFormat:
             @"https://html.duckduckgo.com/html/?q=%@", encoded];
-        CPFetch(url, @"GET", nil, nil, 15, ^(NSData *d, NSInteger status, NSError *e) {
+        /* without a user agent duckduckgo answers 202 with a bot check page and no results */
+        NSDictionary *headers = @{@"User-Agent": @"LegacyPodClaw/0.4 (iOS 6)"};
+        CPFetch(url, @"GET", headers, nil, 15, ^(NSData *d, NSInteger status, NSError *e) {
             if (e) { cb(nil, e); return; }
+            if (status != 200) {
+                cb(nil, [NSError errorWithDomain:@"OCTools" code:status userInfo:@{NSLocalizedDescriptionKey:
+                    [NSString stringWithFormat:@"DuckDuckGo returned HTTP %ld", (long)status]}]);
+                return;
+            }
             NSString *html = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] autorelease];
             /* Extract result snippets - simple parsing */
             NSMutableArray *results = [NSMutableArray array];
             NSArray *chunks = [html componentsSeparatedByString:@"result__snippet"];
             for (NSUInteger i = 1; i < MIN([chunks count], 6); i++) {
                 NSString *chunk = [chunks objectAtIndex:i];
+                /* the split lands inside the snippet's opening tag; keep only the text up to its closing tag */
+                NSRange open = [chunk rangeOfString:@">"];
+                if (open.location == NSNotFound) continue;
+                chunk = [chunk substringFromIndex:NSMaxRange(open)];
+                NSRange end = [chunk rangeOfString:@"</a>"];
+                if (end.location != NSNotFound) chunk = [chunk substringToIndex:end.location];
                 /* Strip HTML tags roughly */
                 NSMutableString *clean = [chunk mutableCopy];
                 while (YES) {

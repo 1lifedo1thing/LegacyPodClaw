@@ -193,20 +193,18 @@ static int64_t _ensureArtist(sqlite3 *db, NSString *name) {
 
     pid = _randomPID();
     NSData *gk = _icuPrimaryKey(name);
-    int64_t sortOrder = _ensureSortMap(db, name);
 
+    /* ios 6 names the sort column sort_item_artist and has no sort_order; a failed insert returns 0 so the caller rolls back */
     if (sqlite3_prepare_v2(db,
-        "INSERT INTO item_artist (item_artist_pid, item_artist, item_artist_sort, sort_order, grouping_key) "
-        "VALUES (?, ?, ?, ?, ?)", -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(s, 1, pid);
-        sqlite3_bind_text(s, 2, [name UTF8String], -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(s, 3, [name UTF8String], -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(s, 4, sortOrder);
-        sqlite3_bind_blob(s, 5, [gk bytes], (int)[gk length], SQLITE_TRANSIENT);
-        sqlite3_step(s);
-        sqlite3_finalize(s);
-    }
-    return pid;
+        "INSERT INTO item_artist (item_artist_pid, item_artist, sort_item_artist, grouping_key) "
+        "VALUES (?, ?, ?, ?)", -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(s, 1, pid);
+    sqlite3_bind_text(s, 2, [name UTF8String], -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 3, [name UTF8String], -1, SQLITE_TRANSIENT);
+    sqlite3_bind_blob(s, 4, [gk bytes], (int)[gk length], SQLITE_TRANSIENT);
+    BOOL done = sqlite3_step(s) == SQLITE_DONE;
+    sqlite3_finalize(s);
+    return done ? pid : 0;
 }
 
 /* Ensure album_artist exists, return pid */
@@ -224,20 +222,17 @@ static int64_t _ensureAlbumArtist(sqlite3 *db, NSString *name) {
 
     pid = _randomPID();
     NSData *gk = _icuPrimaryKey(name);
-    int64_t sortOrder = _ensureSortMap(db, name);
 
     if (sqlite3_prepare_v2(db,
-        "INSERT INTO album_artist (album_artist_pid, album_artist, album_artist_sort, sort_order, grouping_key) "
-        "VALUES (?, ?, ?, ?, ?)", -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(s, 1, pid);
-        sqlite3_bind_text(s, 2, [name UTF8String], -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(s, 3, [name UTF8String], -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(s, 4, sortOrder);
-        sqlite3_bind_blob(s, 5, [gk bytes], (int)[gk length], SQLITE_TRANSIENT);
-        sqlite3_step(s);
-        sqlite3_finalize(s);
-    }
-    return pid;
+        "INSERT INTO album_artist (album_artist_pid, album_artist, sort_album_artist, grouping_key) "
+        "VALUES (?, ?, ?, ?)", -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(s, 1, pid);
+    sqlite3_bind_text(s, 2, [name UTF8String], -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 3, [name UTF8String], -1, SQLITE_TRANSIENT);
+    sqlite3_bind_blob(s, 4, [gk bytes], (int)[gk length], SQLITE_TRANSIENT);
+    BOOL done = sqlite3_step(s) == SQLITE_DONE;
+    sqlite3_finalize(s);
+    return done ? pid : 0;
 }
 
 /* Ensure album exists, return pid */
@@ -255,21 +250,24 @@ static int64_t _ensureAlbum(sqlite3 *db, NSString *name, int64_t albumArtistPid)
 
     pid = _randomPID();
     NSData *gk = _icuPrimaryKey(name);
-    int64_t sortOrder = _ensureSortMap(db, name);
 
     if (sqlite3_prepare_v2(db,
-        "INSERT INTO album (album_pid, album, album_sort, album_artist_pid, sort_order, grouping_key) "
-        "VALUES (?, ?, ?, ?, ?, ?)", -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_int64(s, 1, pid);
-        sqlite3_bind_text(s, 2, [name UTF8String], -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(s, 3, [name UTF8String], -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(s, 4, albumArtistPid);
-        sqlite3_bind_int64(s, 5, sortOrder);
-        sqlite3_bind_blob(s, 6, [gk bytes], (int)[gk length], SQLITE_TRANSIENT);
-        sqlite3_step(s);
-        sqlite3_finalize(s);
-    }
-    return pid;
+        "INSERT INTO album (album_pid, album, sort_album, album_artist_pid, grouping_key) "
+        "VALUES (?, ?, ?, ?, ?)", -1, &s, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_int64(s, 1, pid);
+    sqlite3_bind_text(s, 2, [name UTF8String], -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(s, 3, [name UTF8String], -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(s, 4, albumArtistPid);
+    sqlite3_bind_blob(s, 5, [gk bytes], (int)[gk length], SQLITE_TRANSIENT);
+    BOOL done = sqlite3_step(s) == SQLITE_DONE;
+    sqlite3_finalize(s);
+    return done ? pid : 0;
+}
+
+/* a non-empty string from json or tool input, so a null or a number never reaches the library */
+static NSString *MDString(NSDictionary *d, NSString *key) {
+    id v = [d isKindOfClass:[NSDictionary class]] ? [d objectForKey:key] : nil;
+    return ([v isKindOfClass:[NSString class]] && [v length]) ? v : nil;
 }
 
 static NSString *_getMusicProxyURL(void) {
@@ -414,7 +412,8 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
     }
     NSString *url = [NSString stringWithFormat:@"%@/info?v=%@", proxyBase, videoId];
 
-    CPFetch(url, @"GET", nil, nil, 30, ^(NSData *data, NSInteger status, NSError *err) {
+    /* yt-dlp can take 50 s to resolve a video on a slow link */
+    CPFetch(url, @"GET", nil, nil, 60, ^(NSData *data, NSInteger status, NSError *err) {
         if (err || !data || status != 200) {
             completion(nil, err ?: [NSError errorWithDomain:@"MusicDL" code:-11
                 userInfo:@{NSLocalizedDescriptionKey:
@@ -508,7 +507,7 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
             @"album": @{@"type": @"string", @"description": @"Album name (optional)"}
         },
         @"required": @[@"video_id"]};
-    /* the info call allows 30 s and the download 120 s */
+    /* the info call allows 60 s and the download 120 s */
     t.timeout = 180;
 
     t.handler = ^(NSDictionary *p, OCToolResultBlock cb) {
@@ -522,10 +521,13 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
                 return;
             }
 
-            NSString *title = [p objectForKey:@"title"] ?: [info objectForKey:@"title"] ?: @"Unknown";
-            NSString *artist = [p objectForKey:@"artist"] ?: [info objectForKey:@"artist"] ?: @"Unknown";
-            NSString *album = [p objectForKey:@"album"] ?: [NSString stringWithFormat:@"%@ - Single", title];
-            int durationSec = [[info objectForKey:@"duration"] intValue];
+            NSString *title = MDString(p, @"title") ?: MDString(info, @"title") ?: @"Unknown";
+            NSString *artist = MDString(p, @"artist") ?: MDString(info, @"artist") ?: @"Unknown";
+            NSString *album = MDString(p, @"album") ?: MDString(info, @"album")
+                ?: [NSString stringWithFormat:@"%@ - Single", title];
+            /* yt-dlp gives the duration as a float, a string or null depending on the extractor */
+            id dur = [info objectForKey:@"duration"];
+            int durationSec = [dur respondsToSelector:@selector(doubleValue)] ? (int)lround([dur doubleValue]) : 0;
 
             /* Check duplicate */
             NSString *dup = [self _checkDuplicate:title artist:artist];
@@ -740,6 +742,12 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
 
 #pragma mark - List Music
 
+static NSString *MDColumn(sqlite3_stmt *s, int col) {
+    const unsigned char *t = sqlite3_column_text(s, col);
+    NSString *v = t ? [NSString stringWithUTF8String:(const char *)t] : nil;
+    return [v length] ? v : nil;
+}
+
 + (OCToolDefinition *)listMusicTool {
     OCToolDefinition *t = [[[OCToolDefinition alloc] init] autorelease];
     t.name = @"list_music";
@@ -752,36 +760,36 @@ static BOOL CPMusicVideoIdIsValid(NSString *videoId) {
         if (sqlite3_open_v2([MEDIA_DB UTF8String], &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
             cb(@"Cannot open MediaLibrary database", nil); return;
         }
-        NSString *search = [p objectForKey:@"search"];
+        NSString *search = MDString(p, @"search");
         NSMutableArray *results = [NSMutableArray array];
-        sqlite3_stmt *s; int rc;
-        if (search && [search length] > 0) {
-            rc = sqlite3_prepare_v2(db,
-                "SELECT ie.title, ia.item_artist, a.album FROM item i "
-                "JOIN item_extra ie ON i.item_pid=ie.item_pid "
-                "LEFT JOIN item_artist ia ON i.item_artist_pid=ia.item_artist_pid "
-                "LEFT JOIN album a ON i.album_pid=a.album_pid "
-                "WHERE ie.title LIKE ? OR ia.item_artist LIKE ? LIMIT 20", -1, &s, NULL);
-            if (rc == SQLITE_OK) {
+        /* an item can lack its artist or album row, so join loosely and name the gap */
+        const char *sql = search
+            ? "SELECT ie.title, ia.item_artist, a.album, ie.total_time_ms FROM item i "
+              "JOIN item_extra ie ON i.item_pid=ie.item_pid "
+              "LEFT JOIN item_artist ia ON i.item_artist_pid=ia.item_artist_pid "
+              "LEFT JOIN album a ON i.album_pid=a.album_pid "
+              "WHERE ie.title LIKE ? OR ia.item_artist LIKE ? OR a.album LIKE ? "
+              "ORDER BY ie.date_modified DESC LIMIT 20"
+            : "SELECT ie.title, ia.item_artist, a.album, ie.total_time_ms FROM item i "
+              "JOIN item_extra ie ON i.item_pid=ie.item_pid "
+              "LEFT JOIN item_artist ia ON i.item_artist_pid=ia.item_artist_pid "
+              "LEFT JOIN album a ON i.album_pid=a.album_pid "
+              "ORDER BY ie.date_modified DESC LIMIT 20";
+        sqlite3_stmt *s;
+        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK) {
+            if (search) {
                 NSString *like = [NSString stringWithFormat:@"%%%@%%", search];
-                sqlite3_bind_text(s, 1, [like UTF8String], -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(s, 2, [like UTF8String], -1, SQLITE_TRANSIENT);
+                for (int i = 1; i <= 3; i++) sqlite3_bind_text(s, i, [like UTF8String], -1, SQLITE_TRANSIENT);
             }
-        } else {
-            rc = sqlite3_prepare_v2(db,
-                "SELECT ie.title, ia.item_artist, a.album FROM item i "
-                "JOIN item_extra ie ON i.item_pid=ie.item_pid "
-                "LEFT JOIN item_artist ia ON i.item_artist_pid=ia.item_artist_pid "
-                "LEFT JOIN album a ON i.album_pid=a.album_pid "
-                "ORDER BY ie.date_modified DESC LIMIT 20", -1, &s, NULL);
-        }
-        if (rc == SQLITE_OK) {
             while (sqlite3_step(s) == SQLITE_ROW) {
-                const char *title = (const char *)sqlite3_column_text(s, 0);
-                const char *artist = (const char *)sqlite3_column_text(s, 1);
-                const char *album = (const char *)sqlite3_column_text(s, 2);
-                [results addObject:[NSString stringWithFormat:@"%s - %s [%s]",
-                    title ?: "?", artist ?: "?", album ?: "?"]];
+                NSString *title = MDColumn(s, 0) ?: @"Untitled";
+                NSString *artist = MDColumn(s, 1) ?: @"Unknown artist";
+                NSString *album = MDColumn(s, 2);
+                long secs = lround(sqlite3_column_double(s, 3) / 1000.0);
+                NSMutableString *line = [NSMutableString stringWithFormat:@"%@ - %@", title, artist];
+                if (album) [line appendFormat:@" [%@]", album];
+                if (secs > 0) [line appendFormat:@" (%ld:%02ld)", secs / 60, secs % 60];
+                [results addObject:line];
             }
             sqlite3_finalize(s);
         }

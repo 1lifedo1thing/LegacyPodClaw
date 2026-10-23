@@ -620,13 +620,14 @@ static BOOL OCIsToken(NSString *s) {
     NSString *clStr = [req headerValue:@"Content-Length"];
     unsigned long long cl = 0;
     if (clStr) {
-        NSScanner *sc = [NSScanner scannerWithString:clStr];
         if ([clStr length] == 0 || [clStr length] > 12 ||
-            [clStr rangeOfCharacterFromSet:[[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location != NSNotFound ||
-            ![sc scanUnsignedLongLong:&cl]) {
+            [clStr rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789"]
+                                            invertedSet]].location != NSNotFound) {
             [self _reject:conn status:400 message:@"Bad Content-Length"];
             return;
         }
+        /* nsscanner scanUnsignedLongLong: is ios 7+; at most 12 ascii digits cannot overflow strtoull */
+        cl = strtoull([clStr UTF8String], NULL, 10);
     }
 
     // auth runs before the body is read, so an unauthenticated client cannot make us buffer anything

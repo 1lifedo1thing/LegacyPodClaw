@@ -7,15 +7,15 @@
  * Quick ask sends directly to API and shows response inline.
  */
 
-#import "SecretStore.h"
-#import "TLSClient.h"
+#import "QuickAsk.h"
 #import "LegacyPodClawNCController.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
 
 #define PREFS_PATH @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
 #define WIDGET_HEIGHT 72.0f
-#define EXPANDED_HEIGHT 180.0f
+#define RESPONSE_TOP 56.0f
+#define MAX_HEIGHT 320.0f
 
 @interface LegacyPodClawNCController () <UITextFieldDelegate> {
     UIView *_view;
@@ -25,9 +25,9 @@
     UITextField *_quickInput;
     UIButton *_askButton;
     UIActivityIndicatorView *_spinner;
-    BOOL _isExpanded;
     BOOL _isProcessing;
-    NSMutableData *_sseBuf;
+    CGFloat _height;
+    id _ask;
     NSMutableString *_streamBuf;
 }
 @end
@@ -43,11 +43,9 @@ static BOOL LPCLockedWithPasscode(void) {
         || ((BOOL (*)(id, SEL))objc_msgSend)(lock, @selector(isPasswordProtected));
 }
 
-/* the generation five claude models think by default and accept an effort level */
-static BOOL LPCModelAlwaysThinks(NSString *model) {
-    for (NSString *family in @[@"claude-opus-5", @"claude-sonnet-5", @"claude-haiku-5", @"claude-fable-5"])
-        if ([model hasPrefix:family]) return YES;
-    return NO;
+/* the tweak links the provider code into springboard; the bundle must not carry a second copy of those classes */
+static Class LPCQuickAskClass(void) {
+    return NSClassFromString(@"OCQuickAsk");
 }
 
 @implementation LegacyPodClawNCController
@@ -60,7 +58,7 @@ static BOOL LPCModelAlwaysThinks(NSString *model) {
 }
 
 - (float)viewHeight {
-    return _isExpanded ? EXPANDED_HEIGHT : WIDGET_HEIGHT;
+    return _height > 0 ? _height : WIDGET_HEIGHT;
 }
 
 - (void)_buildView {
@@ -77,7 +75,8 @@ static BOOL LPCModelAlwaysThinks(NSString *model) {
     [_view addSubview:bg];
 
     /* Title row */
-    _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 4, 100, 16)];
+    /* 100 pt cut the name to "LegacyPodCl..." */
+    _titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 4, 112, 16)];
     _titleLabel.text = @"LegacyPodClaw";
     _titleLabel.textColor = [UIColor whiteColor];
     _titleLabel.font = [UIFont boldSystemFontOfSize:13];
@@ -85,12 +84,14 @@ static BOOL LPCModelAlwaysThinks(NSString *model) {
     [_view addSubview:_titleLabel];
 
     /* Status (right-aligned on title row) */
-    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(w - 140, 4, 130, 16)];
+    _statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(126, 4, w - 136, 16)];
+    _statusLabel.adjustsFontSizeToFitWidth = YES;
+    _statusLabel.minimumFontSize = 8;
     _statusLabel.textColor = [UIColor colorWithWhite:0.7f alpha:1];
     _statusLabel.font = [UIFont systemFontOfSize:11];
     _statusLabel.textAlignment = NSTextAlignmentRight;
     _statusLabel.backgroundColor = [UIColor clearColor];
-    _statusLabel.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+    _statusLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [_view addSubview:_statusLabel];
 
     /* Quick input row */
@@ -133,13 +134,14 @@ static BOOL LPCModelAlwaysThinks(NSString *model) {
     [_view addSubview:_spinner];
 
     /* Response area (shown when expanded) */
-    _responseLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 56, w - 20, EXPANDED_HEIGHT - 60)];
+    _responseLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, RESPONSE_TOP, w - 20, 0)];
     _responseLabel.textColor = [UIColor colorWithWhite:0.9f alpha:1];
     _responseLabel.font = [UIFont systemFontOfSize:12];
     _responseLabel.numberOfLines = 0;
     _responseLabel.backgroundColor = [UIColor clearColor];
     _responseLabel.hidden = YES;
     _responseLabel.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    _responseLabel.lineBreakMode = NSLineBreakByWordWrapping;
     [_view addSubview:_responseLabel];
 }
 
@@ -147,7 +149,8 @@ static BOOL LPCModelAlwaysThinks(NSString *model) {
     [_view release]; [_titleLabel release]; [_statusLabel release];
     [_responseLabel release]; [_quickInput release]; [_askButton release];
     [_spinner release];
-    [_sseBuf release]; [_streamBuf release];
+    [_ask cancel];
+    [_ask release]; [_streamBuf release];
     [super dealloc];
 }
 
@@ -156,7 +159,14 @@ static BOOL LPCModelAlwaysThinks(NSString *model) {
 - (void)viewWillAppear {
     [self _refreshStatus];
     if (LPCLockedWithPasscode()) {
+        [_ask cancel];
+        _isProcessing = NO;
+        _askButton.hidden = NO;
+        [_spinner stopAnimating];
         _responseLabel.text = @"";
+        _responseLabel.hidden = YES;
+        _height = 0;
+        _view.frame = CGRectMake(_view.frame.origin.x, _view.frame.origin.y, _view.bounds.size.width, WIDGET_HEIGHT);
         _quickInput.enabled = NO;
         _quickInput.placeholder = @"Unlock to ask";
     } else {
@@ -185,13 +195,13 @@ static BOOL LPCModelAlwaysThinks(NSString *model) {
 - (void)_refreshStatus {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *host = [prefs objectForKey:@"gatewayHost"];
-    BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
+    Class qa = LPCQuickAskClass();
 
     if (host && [host length] > 0) {
         _statusLabel.text = host;
         _statusLabel.textColor = [UIColor colorWithRed:0.4f green:0.9f blue:0.5f alpha:1];
-    } else if (hasKey) {
-        _statusLabel.text = @"Direct API";
+    } else if (qa && [qa isConfigured:prefs]) {
+        _statusLabel.text = [[qa providerForPrefs:prefs] displayName];
         _statusLabel.textColor = [UIColor colorWithRed:0.5f green:0.75f blue:1 alpha:1];
     } else {
         _statusLabel.text = @"Not Configured";
@@ -220,108 +230,45 @@ static BOOL LPCModelAlwaysThinks(NSString *model) {
 }
 
 - (void)_sendQuery:(NSString *)query {
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-    NSString *apiKey = [CPSecretStore secretForKey:@"apiKey"];
-    /* the widget talks to anthropic only, so another provider's model id would be rejected */
-    NSString *provider = [prefs objectForKey:@"modelProvider"];
-    NSString *model = [prefs objectForKey:@"modelId"];
-    if ((provider && ![provider isEqualToString:@"anthropic"]) || [model length] == 0) model = @"claude-sonnet-5-5";
-
-    if (!apiKey || [apiKey length] == 0) {
-        [self _showResponse:@"Set an API key in Settings > LegacyPodClaw"];
+    Class qa = LPCQuickAskClass();
+    if (!qa) {
+        [self _showResponse:@"The LegacyPodClaw tweak is not loaded. Respring and try again."];
         return;
     }
+    /* the widget uses the provider, model, key and base url chosen in the app */
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
+    [_ask cancel];
+    [_ask release];
+    _ask = [[qa alloc] initWithPrefs:prefs];
 
     _isProcessing = YES;
     _askButton.hidden = YES;
     [_spinner startAnimating];
-
     [_streamBuf release];
     _streamBuf = [[NSMutableString alloc] init];
-    [_sseBuf release];
-    _sseBuf = [[NSMutableData alloc] init];
+    [self _setResponse:@"Thinking..." color:[UIColor colorWithWhite:0.6f alpha:1]];
 
-    /* Expand to show response */
-    [self _expand];
-
-    _responseLabel.text = @"Thinking...";
-    _responseLabel.textColor = [UIColor colorWithWhite:0.6f alpha:1];
-
-    NSDictionary *headers = @{@"Content-Type": @"application/json", @"anthropic-version": @"2023-06-01",
-                              @"x-api-key": apiKey, @"Accept": @"text/event-stream"};
-
-    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithDictionary:@{
-        @"model": model,
-        @"max_tokens": @(256),
-        @"stream": @YES,
-        @"system": @"You are Molty, a concise AI in a Notification Center widget. "
-                    "Maximum 2-3 sentences. Be extremely brief.",
-        @"messages": @[@{@"role": @"user", @"content": query}]
-    }];
-    /* current models always think and pay for it from max_tokens, so give room and ask for little thought */
-    if (LPCModelAlwaysThinks(model)) {
-        [body setObject:@(2048) forKey:@"max_tokens"];
-        [body setObject:@{@"effort": @"low"} forKey:@"output_config"];
-    }
-    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-
-    /* the tweak links wolfssl into springboard; the ios 6 tls stack cannot reach the api safely */
-    Class tls = NSClassFromString(@"CPTLSClient");
-    if (!tls) {
-        [self _showResponse:@"The LegacyPodClaw tweak is not loaded. Respring and try again."];
-        return;
-    }
-    [tls streamRequest:@"https://api.anthropic.com/v1/messages" method:@"POST" headers:headers body:bodyData
-               onChunk:^(NSData *chunk) { [self _consumeEvents:chunk]; }
-            completion:^(NSData *data, NSInteger status, NSError *error) {
-        if (error) {
-            [self _showResponse:[NSString stringWithFormat:@"Error: %@", [error localizedDescription]]];
-        } else if (status < 200 || status >= 300) {
-            NSDictionary *json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-            id err = [json isKindOfClass:[NSDictionary class]] ? [json objectForKey:@"error"] : nil;
-            NSString *message = [err isKindOfClass:[NSDictionary class]] ? [err objectForKey:@"message"] : nil;
-            [self _showResponse:[NSString stringWithFormat:@"Error %ld: %@", (long)status, message ?: @"request failed"]];
-        } else {
+    NSString *system = @"You are Molty, a concise AI in a Notification Center widget. "
+                        "Maximum 2-3 sentences. Be extremely brief.";
+    [_ask askWithSystem:system history:@[@{@"role": @"user", @"content": query}] maxTokens:256
+        onText:^(NSString *delta) {
+            [_streamBuf appendString:delta];
+            [self _setResponse:_streamBuf color:[UIColor colorWithWhite:0.9f alpha:1]];
+        }
+        completion:^(NSString *text, NSError *error) {
+            if (error) {
+                id provider = [_ask provider];
+                NSString *model = [_ask model];
+                [self _showResponse:[NSString stringWithFormat:@"%@ (%@ \u00b7 %@)", [error localizedDescription],
+                                     [provider displayName], [model length] ? model : @"no model set"]];
+                return;
+            }
             _isProcessing = NO;
             _askButton.hidden = NO;
             [_spinner stopAnimating];
             _quickInput.text = @"";
-        }
-    }];
-}
-
-#pragma mark - Streaming
-
-/* chunks arrive on the main queue */
-- (void)_consumeEvents:(NSData *)data {
-    /* decode only whole lines, so a multi-byte character split across chunks is not lost */
-    [_sseBuf appendData:data];
-    const uint8_t *bytes = [_sseBuf bytes];
-    NSUInteger end = [_sseBuf length];
-    while (end > 0 && bytes[end - 1] != '\n') end--;
-    if (end == 0) return;
-    NSString *whole = [[[NSString alloc] initWithBytes:bytes length:end encoding:NSUTF8StringEncoding] autorelease];
-    [_sseBuf replaceBytesInRange:NSMakeRange(0, end) withBytes:NULL length:0];
-    if (!whole) return;
-    NSArray *lines = [whole componentsSeparatedByString:@"\n"];
-
-    for (NSUInteger i = 0; i < [lines count] - 1; i++) {
-        NSString *line = [lines objectAtIndex:i];
-        if (![line hasPrefix:@"data: "]) continue;
-        NSString *json = [line substringFromIndex:6];
-        if ([json isEqualToString:@"[DONE]"]) continue;
-        NSDictionary *evt = [NSJSONSerialization JSONObjectWithData:
-            [json dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
-        if (![evt isKindOfClass:[NSDictionary class]]) continue;
-        if ([[evt objectForKey:@"type"] isEqualToString:@"content_block_delta"]) {
-            NSString *text = [[evt objectForKey:@"delta"] objectForKey:@"text"];
-            if ([text isKindOfClass:[NSString class]]) {
-                [_streamBuf appendString:text];
-                _responseLabel.textColor = [UIColor colorWithWhite:0.9f alpha:1];
-                _responseLabel.text = _streamBuf;
-            }
-        }
-    }
+            if ([_streamBuf length] == 0) [self _setResponse:[text length] ? text : @"(no reply)" color:[UIColor colorWithWhite:0.9f alpha:1]];
+        }];
 }
 
 #pragma mark - Display
@@ -330,26 +277,43 @@ static BOOL LPCModelAlwaysThinks(NSString *model) {
     _isProcessing = NO;
     _askButton.hidden = NO;
     [_spinner stopAnimating];
-    [self _expand];
-    _responseLabel.textColor = [UIColor colorWithWhite:0.9f alpha:1];
-    _responseLabel.text = text;
+    [self _setResponse:text color:[UIColor colorWithWhite:0.9f alpha:1]];
 }
 
-- (void)_expand {
-    if (_isExpanded) return;
-    _isExpanded = YES;
+/* the row height follows the text, or a long answer draws over the rows below the widget */
+- (void)_setResponse:(NSString *)text color:(UIColor *)color {
     _responseLabel.hidden = NO;
+    _responseLabel.textColor = color;
+    _responseLabel.text = text;
 
     CGFloat w = _view.bounds.size.width;
-    _view.frame = CGRectMake(0, 0, w, EXPANDED_HEIGHT);
+    CGFloat maxText = MAX_HEIGHT - RESPONSE_TOP - 8;
+    CGSize fit = [text sizeWithFont:_responseLabel.font constrainedToSize:CGSizeMake(w - 20, maxText)
+                      lineBreakMode:NSLineBreakByWordWrapping];
+    CGFloat textH = ceilf(fit.height);
+    _responseLabel.frame = CGRectMake(10, RESPONSE_TOP, w - 20, textH);
 
-    /* Tell NC we changed size */
-    id host = nil;
-    if ([self respondsToSelector:@selector(host)]) {
-        host = [self performSelector:@selector(host)];
-    }
-    if (host && [host respondsToSelector:@selector(weeAppWantsSizeUpdate:)]) {
-        [host performSelector:@selector(weeAppWantsSizeUpdate:) withObject:self];
+    CGFloat height = RESPONSE_TOP + textH + 8;
+    if (height == _height) return;
+    _height = height;
+    _view.frame = CGRectMake(_view.frame.origin.x, _view.frame.origin.y, w, height);
+    [self _relayoutHost];
+}
+
+/* notification center reads viewHeight only when its table recomputes row heights */
+- (void)_relayoutHost {
+    UIView *v = _view.superview;
+    while (v && ![v isKindOfClass:[UITableView class]]) v = v.superview;
+    UITableView *table = (UITableView *)v;
+    [table beginUpdates];
+    [table endUpdates];
+    /* the "No New Notifications" label sits below the rows and moves only when the list view asks it to */
+    SEL position = @selector(_positionNoNotificationsLabel);
+    while (v && ![v respondsToSelector:position]) v = v.superview;
+    if (v) {
+        [v performSelector:position];
+        /* again once the row height animation has changed the content size */
+        [v performSelector:position withObject:nil afterDelay:0.35];
     }
 }
 

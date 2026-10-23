@@ -48,6 +48,8 @@
         NSString *name = [[alertView textFieldAtIndex:0] text];
         if ([name length] == 0) name = @"New Chat";
         [[AppDelegate shared].sessionManager createSession:name];
+        /* a local session is added at once; the list does not hear about it any other way */
+        [self.tableView reloadData];
     }
 }
 

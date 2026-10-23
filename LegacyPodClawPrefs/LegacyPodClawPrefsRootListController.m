@@ -213,6 +213,12 @@ static NSString *ProbeTCP(NSString *host, NSString *port) {
     [self reloadSpecifiers];
 }
 
+/* the fixed rows have no key, so the stock getter finds nothing and the cell shows no value */
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    if (![specifier propertyForKey:@"key"]) return [specifier propertyForKey:@"default"];
+    return [super readPreferenceValue:specifier];
+}
+
 - (id)deviceRAM:(id)specifier {
     uint64_t bytes = 0;
     size_t len = sizeof(bytes);

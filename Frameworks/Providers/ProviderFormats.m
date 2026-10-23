@@ -60,7 +60,7 @@ static BOOL AlwaysThinks(NSString *model) {
 NSDictionary *OCAnthropicRequestBody(NSString *model, NSString *system, NSArray *messages,
                                      NSArray *tools, NSUInteger maxTokens) {
     NSMutableArray *turns = [NSMutableArray arrayWithCapacity:[messages count]];
-    for (OCAgentMessage *m in messages) {
+    for (id<OCProviderMessage> m in messages) {
         NSMutableArray *blocks = [NSMutableArray array];
         switch (m.role) {
             case OCAgentRoleUser:
@@ -120,7 +120,7 @@ NSDictionary *OCOpenAIRequestBody(OCProviderInfo *info, NSString *model, NSStrin
                                   NSArray *messages, NSArray *tools, NSUInteger maxTokens) {
     NSMutableArray *out = [NSMutableArray arrayWithCapacity:[messages count] + 1];
     if ([system length]) [out addObject:@{@"role": @"system", @"content": system}];
-    for (OCAgentMessage *m in messages) {
+    for (id<OCProviderMessage> m in messages) {
         switch (m.role) {
             case OCAgentRoleUser:
                 if ([m.content length]) [out addObject:@{@"role": @"user", @"content": m.content}];

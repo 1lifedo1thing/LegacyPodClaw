@@ -3,6 +3,8 @@
 
 case "$1" in
     remove|purge)
+        # ios relaunched the voip app after prerm stopped it; its files are gone now, so it stays stopped
+        killall LegacyPodClaw 2>/dev/null
         # ask cydia to restart springboard, so the removed tweak unloads
         if [ -n "$CYDIA" ]; then
             eval "echo 'finish:restart' >&${CYDIA%% *}"
@@ -19,6 +21,11 @@ case "$1" in
         rm -rf /var/lib/legacypodclaw
         rm -rf /var/mobile/Library/LegacyPodClaw
         rm -f /var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist
+        # chat history, its sqlite side files, the log and the gateway store live in mobile's documents
+        rm -f /var/mobile/Documents/openclaw.db /var/mobile/Documents/openclaw.db-wal \
+              /var/mobile/Documents/openclaw.db-shm /var/mobile/Documents/openclaw.db-journal \
+              /var/mobile/Documents/openclaw.log /var/mobile/Documents/openclaw.log.old
+        rm -rf /var/mobile/Documents/openclaw-gw
         ;;
 esac
 

@@ -17,6 +17,7 @@ static const NSTimeInterval kMaxMessageAge = 600;
     BOOL _running;
     BOOL _connected;
     BOOL _quickPoll;
+    BOOL _shownConnected;
     long long _lastUpdateId;
     NSUInteger _pollGeneration;
     NSTimeInterval _backoff;
@@ -77,6 +78,7 @@ static NSString *TelegramErrorText(NSInteger status, id json) {
     _backoff = 0;
     /* a long poll can take 25 s to answer, so the first call returns at once to show the link works */
     _quickPoll = YES;
+    _shownConnected = NO;
     _pollGeneration++;
     OCChannelStatusChanged(self);
     [self _poll];
@@ -90,9 +92,12 @@ static NSString *TelegramErrorText(NSInteger status, id json) {
 }
 
 - (void)_setError:(NSString *)error {
+    /* each poll clears the error, so post only a real change or every visible table reloads every 25 s */
+    BOOL changed = !(error == _lastError || [error isEqualToString:_lastError]) || _connected != _shownConnected;
     [_lastError release];
     _lastError = [error copy];
-    OCChannelStatusChanged(self);
+    _shownConnected = _connected;
+    if (changed) OCChannelStatusChanged(self);
 }
 
 - (void)_poll {

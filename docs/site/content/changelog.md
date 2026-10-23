@@ -21,6 +21,11 @@ Version 0.4.2 fixes the chat channels and the lock screen.
 - Errors use plain words, for example "Telegram refused the bot token (HTTP 401)" and "Slack refused the bot token (invalid_auth)".
 - A change to the settings of one channel restarts only that channel. Before, each change restarted all channels.
 - Telegram keeps its last update ID across a restart. Before, a restart could fetch an update again and answer it twice.
+- After a failed call, Telegram makes a quick call, so the row shows **Connected** again without a 25-second wait.
+- The channel list on the main Settings screen shows the same state as each channel's **Status** row. Before, it showed **On** for a channel that was stopped or not connected.
+- The webhook channel shows **Stopped** when its callback URL cannot be used.
+- A channel restart stops each reply that is still running, so a late reply does not reach the new channel.
+- When a plugin is removed, its channel is removed too. Before, the channel stayed registered.
 - Discord sends its first heartbeat after a random part of the heartbeat interval, as the Discord gateway documentation tells.
 - The Discord User-Agent is `DiscordBot (https://github.com/wrxck/LegacyPodClaw, 0.4.2)`. The version comes from the app bundle.
 - Slack JSON requests send `Content-Type: application/json; charset=utf-8`. Before, Slack warned `missing_charset`.
@@ -29,6 +34,7 @@ Version 0.4.2 fixes the chat channels and the lock screen.
 
 - The WebSocket clients answer a close frame from the server with a close frame that has the same status code. The client close frame has the status code 1000. Before, the Discord and Slack client did not answer, and its close frame had no status code (RFC 6455, section 5.5.1).
 - The gateway server answers a close frame with the client's status code.
+- A reserved or unknown close code gets the answer 1002, because RFC 6455 does not allow it on the wire.
 
 ### Tools
 

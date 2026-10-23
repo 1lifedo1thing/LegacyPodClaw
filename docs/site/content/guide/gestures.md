@@ -52,7 +52,7 @@ Pull down Notification Center. The LegacyPodClaw widget shows the status, a ques
   - **LegacyPodClaw - Connected** when a gateway host is set. The label never shows the host name.
   - **LegacyPodClaw - Ready** when the provider that you chose in the app is set up.
   - **LegacyPodClaw** in all other conditions.
-- With no passcode, the camera grabber shows the LegacyPodClaw icon. The camera gesture unlocks the device and opens the overlay.
+- With no passcode, the camera grabber shows the LegacyPodClaw icon. Tap the grabber to unlock the device and open the overlay. A drag up on the grabber does nothing.
 - With a passcode, the camera grabber shows Apple's camera icon. The camera gesture opens Apple's camera, so the gesture cannot skip the passcode.
 
 ## App switcher

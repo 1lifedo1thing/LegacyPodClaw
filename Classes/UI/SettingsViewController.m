@@ -316,7 +316,8 @@ enum {
             cell.accessoryType = UITableViewCellAccessoryNone;
             if (indexPath.row == 0) {
                 cell.textLabel.text = @"Version";
-                cell.detailTextLabel.text = @"0.3.0";
+                /* one source for the version: the bundle the package installs */
+                cell.detailTextLabel.text = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleShortVersionString"];
             } else {
                 cell.textLabel.text = @"Device";
                 cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ iOS %@",

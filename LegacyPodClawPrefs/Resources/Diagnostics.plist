@@ -25,8 +25,8 @@
 			<string>PSTitleValueCell</string>
 			<key>label</key>
 			<string>Device RAM</string>
-			<key>default</key>
-			<string>256 MB</string>
+			<key>get</key>
+			<string>deviceRAM:</string>
 		</dict>
 
 		<dict>
@@ -41,7 +41,7 @@
 			<key>label</key>
 			<string>Version</string>
 			<key>default</key>
-			<string>0.1.0</string>
+			<string>0.4.0</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -49,7 +49,7 @@
 			<key>label</key>
 			<string>Runtime</string>
 			<key>default</key>
-			<string>PicoClaw Native</string>
+			<string>Native Objective-C</string>
 		</dict>
 		<dict>
 			<key>cell</key>

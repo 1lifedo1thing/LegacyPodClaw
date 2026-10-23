@@ -14,6 +14,12 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <sys/sysctl.h>
 #import <signal.h>
+#import <sys/socket.h>
+#import <netdb.h>
+#import <fcntl.h>
+#import <poll.h>
+#import <unistd.h>
+#import <errno.h>
 #import "SecretStore.h"
 
 #define PREFS_DOMAIN @"pro.matthesketh.legacypodclaw"
@@ -96,20 +102,54 @@ static BOOL WriteSecret(id value, PSSpecifier *specifier) {
     [alert release];
 }
 
+/* a tcp connect with a 5 s limit; it shows whether the gateway port answers, not whether the token is right */
+static NSString *ProbeTCP(NSString *host, NSString *port) {
+    struct addrinfo hints = {0}, *res = NULL;
+    hints.ai_socktype = SOCK_STREAM;
+    int gai = getaddrinfo([host UTF8String], [port UTF8String], &hints, &res);
+    if (gai != 0) return [NSString stringWithFormat:@"Cannot resolve %@ (%s)", host, gai_strerror(gai)];
+    NSString *result = [NSString stringWithFormat:@"No answer from %@:%@", host, port];
+    for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+        int s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s < 0) continue;
+        fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+        int rc = connect(s, ai->ai_addr, ai->ai_addrlen);
+        if (rc != 0 && errno == EINPROGRESS) {
+            struct pollfd pfd = { .fd = s, .events = POLLOUT };
+            int err = 0;
+            socklen_t elen = sizeof(err);
+            if (poll(&pfd, 1, 5000) == 1 && getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &elen) == 0) {
+                rc = err == 0 ? 0 : -1;
+                if (err) result = [NSString stringWithFormat:@"%@:%@ refused the connection (%s)", host, port, strerror(err)];
+            }
+        }
+        close(s);
+        if (rc == 0) { result = [NSString stringWithFormat:@"%@:%@ answers.", host, port]; break; }
+    }
+    freeaddrinfo(res);
+    return result;
+}
+
 - (void)testConnection {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-    NSString *host = [prefs objectForKey:@"gatewayHost"] ?: @"(not set)";
-    NSString *port = [prefs objectForKey:@"gatewayPort"] ?: @"18789";
-
-    UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Connection Info"
-                                                    message:[NSString stringWithFormat:
-                                                             @"Host: %@\nPort: %@",
-                                                             host, port]
-                                                   delegate:nil
-                                          cancelButtonTitle:@"OK"
-                                          otherButtonTitles:nil];
-    [alert show];
-    [alert release];
+    NSString *host = [prefs objectForKey:@"gatewayHost"];
+    NSString *port = [[prefs objectForKey:@"gatewayPort"] description] ?: @"18789";
+    if ([host length] == 0) {
+        UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"No Gateway Host"
+            message:@"Set the gateway host first." delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
+        [alert show];
+        [alert release];
+        return;
+    }
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSString *result = ProbeTCP(host, port);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Connection Test" message:result
+                delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
+            [alert show];
+            [alert release];
+        });
+    });
 }
 
 - (void)resetAllSettings {
@@ -171,6 +211,19 @@ static BOOL WriteSecret(id value, PSSpecifier *specifier) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self reloadSpecifiers];
+}
+
+- (id)deviceRAM:(id)specifier {
+    uint64_t bytes = 0;
+    size_t len = sizeof(bytes);
+    if (sysctlbyname("hw.memsize", &bytes, &len, NULL, 0) != 0) {
+        /* 32-bit kernels report hw.physmem as an int */
+        int mem = 0;
+        len = sizeof(mem);
+        if (sysctlbyname("hw.physmem", &mem, &len, NULL, 0) != 0) return @"Unknown";
+        bytes = (uint64_t)(unsigned int)mem;
+    }
+    return [NSString stringWithFormat:@"%llu MB", bytes / (1024 * 1024)];
 }
 
 @end

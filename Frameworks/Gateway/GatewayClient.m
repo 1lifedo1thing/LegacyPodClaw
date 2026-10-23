@@ -121,7 +121,7 @@ static NSString *const kFrameTypeEvent = @"event";
         _maxReconnectAttempts = 20;
         _reconnectAttempt = 0;
         _clientId = [[self _generateUUID] retain];
-        _clientVersion = [@"clawpod-ios6/0.1.0" retain];
+        _clientVersion = [@"legacypodclaw-ios6/0.4.0" retain];
         _clientDisplayName = [@"iPod Touch" retain];
         _delegateQueue = dispatch_get_main_queue();
         _clientQueue = dispatch_queue_create("pro.matthesketh.legacypodclaw.gateway", DISPATCH_QUEUE_SERIAL);
@@ -331,7 +331,7 @@ static NSString *const kFrameTypeEvent = @"event";
     NSDictionary *client = @{
         @"id": _clientId ?: @"",
         @"displayName": _clientDisplayName ?: @"iPod Touch 4",
-        @"version": _clientVersion ?: @"0.1.0",
+        @"version": _clientVersion ?: @"0.4.0",
         @"platform": @"ios6",
         @"mode": @"frontend"
     };

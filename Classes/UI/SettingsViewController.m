@@ -8,6 +8,8 @@
 
 #import "SettingsViewController.h"
 #import "AppDelegate.h"
+#import "SecretStore.h"
+#import <sys/stat.h>
 #import <notify.h>
 
 #define PREFS_PATH @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
@@ -54,12 +56,14 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
 }
 
 - (void)_savePrefs {
-    [_prefs writeToFile:PREFS_PATH atomically:YES];
+    /* the plist holds the api base url, so keep it private to mobile */
+    if ([_prefs writeToFile:PREFS_PATH atomically:YES]) chmod([PREFS_PATH fileSystemRepresentation], 0600);
     notify_post("pro.matthesketh.legacypodclaw/prefsChanged");
     [[AppDelegate shared] loadConnectionSettings];
 }
 
 - (NSString *)_prefString:(NSString *)key {
+    if ([CPSecretStore isSecretKey:key]) return [CPSecretStore secretForKey:key] ?: @"";
     return [_prefs objectForKey:key] ?: @"";
 }
 
@@ -349,7 +353,16 @@ typedef NS_ENUM(NSUInteger, SettingsSection) {
         case 400: key = @"serverPort"; break;
     }
 
-    if (key && value) {
+    if (key && value && [CPSecretStore isSecretKey:key]) {
+        if (![CPSecretStore setSecret:value forKey:key]) {
+            UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Not Saved"
+                message:@"clawpodd did not store the value. Unlock the device and check that clawpodd runs."
+                delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
+            [alert show]; [alert release];
+        }
+        [self _savePrefs];
+        [self.tableView reloadData];
+    } else if (key && value) {
         if ([value length] > 0) {
             [_prefs setObject:value forKey:key];
         } else {

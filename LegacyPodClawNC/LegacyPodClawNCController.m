@@ -7,6 +7,7 @@
  * Quick ask sends directly to API and shows response inline.
  */
 
+#import "SecretStore.h"
 #import "LegacyPodClawNCController.h"
 
 #define PREFS_PATH @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
@@ -158,7 +159,7 @@
 - (void)_refreshStatus {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *host = [prefs objectForKey:@"gatewayHost"];
-    BOOL hasKey = [[prefs objectForKey:@"apiKey"] length] > 0;
+    BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
 
     if (host && [host length] > 0) {
         _statusLabel.text = host;
@@ -190,7 +191,7 @@
 
 - (void)_sendQuery:(NSString *)query {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-    NSString *apiKey = [prefs objectForKey:@"apiKey"];
+    NSString *apiKey = [CPSecretStore secretForKey:@"apiKey"];
     NSString *model = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514";
 
     if (!apiKey || [apiKey length] == 0) {

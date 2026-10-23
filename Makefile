@@ -47,7 +47,7 @@ LegacyPodClaw_FILES = \
 	Frameworks/Tools/MusicDownloader.m \
 	Frameworks/System/System.m \
 	Frameworks/System/TLSClient.m \
-	Frameworks/System/SecureKeychain.m
+	Frameworks/System/SecretStore.m
 
 LegacyPodClaw_CFLAGS = \
 	-IFrameworks/WebSocket \
@@ -77,8 +77,7 @@ LegacyPodClaw_CFLAGS = \
 	-IVendor/wolfssl/include \
 	-IVendor/wolfssl-build \
 	-DWOLFSSL_USER_SETTINGS \
-	-DSECURITY_ENHANCED \
-	-DSECURE_KEYCHAIN_ENABLED
+	-DSECURITY_ENHANCED
 
 LegacyPodClaw_OBJCFLAGS = -fno-objc-arc
 

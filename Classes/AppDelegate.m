@@ -7,6 +7,7 @@
  */
 
 #import "AppDelegate.h"
+#import "SecretStore.h"
 #import "RootViewController.h"
 #import "ExtendedTools.h"
 #import "SystemMCP.h"
@@ -219,13 +220,9 @@ static AppDelegate *_shared = nil;
 #pragma mark - Settings (read from PreferenceLoader shared prefs)
 
 - (void)saveConnectionSettings {
-    /* Device token is the only thing the app writes back */
-    if (_gateway.authConfig.deviceToken) {
-        NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:
-            @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"] ?: [NSMutableDictionary dictionary];
-        [prefs setObject:_gateway.authConfig.deviceToken forKey:@"deviceToken"];
-        [prefs writeToFile:@"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist" atomically:YES];
-    }
+    /* device token is the only thing the app writes back */
+    if (_gateway.authConfig.deviceToken)
+        [CPSecretStore setSecret:_gateway.authConfig.deviceToken forKey:@"deviceToken"];
 }
 
 - (void)loadConnectionSettings {
@@ -241,15 +238,15 @@ static AppDelegate *_shared = nil;
     _gateway.allowSelfSignedCerts = [[prefs objectForKey:@"allowSelfSigned"] boolValue];
 
     OCGatewayAuthConfig *auth = [[OCGatewayAuthConfig alloc] init];
-    auth.token = [prefs objectForKey:@"authToken"];
-    auth.password = [prefs objectForKey:@"authPassword"];
-    auth.deviceToken = [prefs objectForKey:@"deviceToken"];
+    auth.token = [CPSecretStore secretForKey:@"authToken"];
+    auth.password = [CPSecretStore secretForKey:@"authPassword"];
+    auth.deviceToken = [CPSecretStore secretForKey:@"deviceToken"];
     _gateway.authConfig = auth;
     [auth release];
 
     /* Local agent config */
     OCModelConfig *modelCfg = [[OCModelConfig alloc] init];
-    modelCfg.apiKey = [prefs objectForKey:@"apiKey"];
+    modelCfg.apiKey = [CPSecretStore secretForKey:@"apiKey"];
     modelCfg.modelId = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514";
     modelCfg.baseURL = [prefs objectForKey:@"customBaseURL"];
     modelCfg.maxTokens = [[prefs objectForKey:@"maxResponseTokens"] intValue] ?: 512;

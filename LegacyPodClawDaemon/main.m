@@ -4,7 +4,8 @@
  *
  * Answers a fixed set of read-only questions over CPDistributedMessagingCenter:
  * ping, status, battery, processes, crashes and an allow-listed sysctl.
- * It registers its mach service as root, then drops to mobile.
+ * It also holds API keys and tokens in the keychain (see SecretServer.m).
+ * It registers its mach services as root, then drops to mobile.
  *
  * Installed to: /usr/bin/clawpodd
  * LaunchDaemon: /Library/LaunchDaemons/pro.matthesketh.legacypodclaw.daemon.plist
@@ -20,6 +21,7 @@
 #import <errno.h>
 #import <dlfcn.h>
 #import <objc/message.h>
+#import "SecretServer.h"
 
 #define DAEMON_VERSION @"0.4.0"
 #define DAEMON_SERVICE @"pro.matthesketh.legacypodclaw.daemon"
@@ -255,7 +257,9 @@ int main(int argc, char *argv[]) {
 
         CPDaemonServer *server = [[CPDaemonServer alloc] init];
         if (![server start]) return 1;
+        BOOL secrets = CPSecretServerStart();
         DropToMobile();
+        if (secrets) CPSecretServerMigrate();
 
         NSLog(@"[clawpodd] %@ serving %@ as uid %d", DAEMON_VERSION, DAEMON_SERVICE, getuid());
         notify_post("pro.matthesketh.legacypodclaw/daemonReady");

@@ -18,37 +18,8 @@
 #import <netdb.h>
 #import <sqlite3.h>
 #import "TLSClient.h"
-#import <Security/Security.h>
+#import "SecretStore.h"
 
-/* Keychain helper for secure API key storage - KEYCHAIN ONLY, NO PLIST FALLBACK */
-static NSString *_keychainGetAPIKey(void) {
-    NSString *service = @"pro.matthesketh.legacypodclaw";
-    NSString *key = @"api_key_anthropic";
-    
-    NSMutableDictionary *query = [NSMutableDictionary dictionary];
-    [query setObject:(id)kSecClassGenericPassword forKey:(id)kSecClass];
-    [query setObject:key forKey:(id)kSecAttrAccount];
-    [query setObject:service forKey:(id)kSecAttrService];
-    [query setObject:(id)kSecReturnData forKey:(id)kSecReturnData];
-    [query setObject:(id)kSecMatchLimitOne forKey:(id)kSecMatchLimit];
-    
-    CFDataRef dataRef = NULL;
-    OSStatus status = SecItemCopyMatching((CFDictionaryRef)query, (CFTypeRef *)&dataRef);
-    
-    if (status == errSecSuccess && dataRef) {
-        NSData *data = (NSData *)dataRef;
-        NSString *apiKey = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (dataRef) CFRelease(dataRef);
-        return [apiKey autorelease];
-    }
-    
-    /* SECURITY: No plist fallback - keychain only for API key security */
-    if (status != errSecSuccess) {
-        NSLog(@"[LegacyPodClaw] API key not found in keychain (status: %d). Key must be configured in app.", (int)status);
-    }
-    
-    return nil;
-}
 
 /* Session persistence — write overlay conversations to the app's DB */
 #define APP_DB_PATH @"/var/mobile/Documents/openclaw.db"
@@ -424,7 +395,7 @@ static void _persistOverlayMessage(NSString *content, int role) {
     _persistOverlayMessage(q, 0); /* 0 = OCMessageRoleUser */
 
     /* Get API key from secure keychain (with plist fallback) */
-    NSString *apiKey = _keychainGetAPIKey();
+    NSString *apiKey = [CPSecretStore secretForKey:@"apiKey"];
     
     /* Get model from prefs */
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
@@ -626,7 +597,7 @@ static void _persistOverlayMessage(NSString *content, int role) {
 - (void)refreshStatus {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *host = [prefs objectForKey:@"gatewayHost"];
-    BOOL hasKey = [[prefs objectForKey:@"apiKey"] length] > 0;
+    BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
 
     if (host && [host length] > 0) {
         _statusLabel.text = [NSString stringWithFormat:@"Gateway: %@", host];
@@ -960,7 +931,7 @@ static UILabel *_lsLabel = nil;
     if (_lsLabel) {
         NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
         NSString *host = [prefs objectForKey:@"gatewayHost"];
-        BOOL hasKey = [[prefs objectForKey:@"apiKey"] length] > 0;
+        BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
 
         if (host && [host length] > 0)
             _lsLabel.text = [NSString stringWithFormat:@"LegacyPodClaw - %@", host];
@@ -1299,7 +1270,7 @@ static UIView *_buildDashboard(CGRect frame) {
     /* Status cards */
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *host = [prefs objectForKey:@"gatewayHost"];
-    BOOL hasKey = [[prefs objectForKey:@"apiKey"] length] > 0;
+    BOOL hasKey = [[CPSecretStore secretForKey:@"apiKey"] length] > 0;
 
     UIView *statusCard = [[[UIView alloc] initWithFrame:CGRectMake(10, y, w-20, 50)] autorelease];
     statusCard.backgroundColor = [UIColor colorWithWhite:1 alpha:0.1f];

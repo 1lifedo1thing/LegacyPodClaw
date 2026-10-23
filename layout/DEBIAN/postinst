@@ -45,7 +45,9 @@ if [ -d /var/mobile/Library/SMS ]; then
 fi
 
 # Preferences
-chmod 666 /var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist 2>/dev/null
+# settings hold the api base url, so only mobile may read or write them
+chown mobile:mobile /var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist 2>/dev/null
+chmod 600 /var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist 2>/dev/null
 
 # Start daemon
 launchctl load /Library/LaunchDaemons/pro.matthesketh.legacypodclaw.daemon.plist 2>/dev/null

@@ -8,14 +8,37 @@
 
 #import "LegacyPodClawPrefsRootListController.h"
 #import <notify.h>
+#import <objc/message.h>
 #import <sqlite3.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <sys/sysctl.h>
 #import <signal.h>
+#import "SecretStore.h"
 
 #define PREFS_DOMAIN @"pro.matthesketh.legacypodclaw"
 #define PREFS_CHANGED_NOTIFICATION "pro.matthesketh.legacypodclaw/prefsChanged"
 #define PREFS_PATH @"/var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist"
+
+/* secrets live in the keychain through clawpodd, never in the plist */
+static id ReadSecretOrPreference(PSListController *self, SEL superSel, PSSpecifier *specifier) {
+    NSString *key = [specifier propertyForKey:@"key"];
+    if ([CPSecretStore isSecretKey:key]) return [CPSecretStore secretForKey:key];
+    struct objc_super sup = {self, [PSListController class]};
+    return ((id (*)(struct objc_super *, SEL, PSSpecifier *))objc_msgSendSuper)(&sup, superSel, specifier);
+}
+
+static BOOL WriteSecret(id value, PSSpecifier *specifier) {
+    NSString *key = [specifier propertyForKey:@"key"];
+    if (![CPSecretStore isSecretKey:key]) return NO;
+    if (![CPSecretStore setSecret:value forKey:key]) {
+        UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Not Saved"
+            message:@"clawpodd did not store the value. Unlock the device and check that clawpodd runs."
+            delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
+        [alert show]; [alert release];
+    }
+    notify_post(PREFS_CHANGED_NOTIFICATION);
+    return YES;
+}
 
 @implementation LegacyPodClawPrefsRootListController
 
@@ -35,7 +58,12 @@
     notify_post(PREFS_CHANGED_NOTIFICATION);
 }
 
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    return ReadSecretOrPreference(self, _cmd, specifier);
+}
+
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    if (WriteSecret(value, specifier)) return;
     [super setPreferenceValue:value specifier:specifier];
     [self _notifyPrefsChanged];
 }
@@ -95,8 +123,9 @@
 
 - (void)alertView:(UIAlertView *)alertView clickedButtonAtIndex:(NSInteger)buttonIndex {
     if (buttonIndex == 1) {
-        /* Delete prefs file */
         [[NSFileManager defaultManager] removeItemAtPath:PREFS_PATH error:nil];
+        for (NSString *key in @[@"apiKey", @"authToken", @"authPassword", @"deviceToken"])
+            [CPSecretStore setSecret:nil forKey:key];
         [self reloadSpecifiers];
         [self _notifyPrefsChanged];
     }
@@ -115,7 +144,12 @@
     return _specifiers;
 }
 
+- (id)readPreferenceValue:(PSSpecifier *)specifier {
+    return ReadSecretOrPreference(self, _cmd, specifier);
+}
+
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
+    if (WriteSecret(value, specifier)) return;
     [super setPreferenceValue:value specifier:specifier];
     notify_post(PREFS_CHANGED_NOTIFICATION);
 }
@@ -361,7 +395,7 @@
 
 - (void)testAPIConnection {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
-    NSString *apiKey = [prefs objectForKey:@"apiKey"];
+    NSString *apiKey = [CPSecretStore secretForKey:@"apiKey"];
     if (!apiKey || [apiKey length] == 0) {
         UIAlertView *a = [[UIAlertView alloc] initWithTitle:@"No API Key"
             message:@"Set an API key first." delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];

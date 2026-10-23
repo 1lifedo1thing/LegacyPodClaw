@@ -35,3 +35,28 @@ typedef void(^CPHTTPSStreamChunk)(NSData *chunk);
 + (void)setPinnedSPKIHashes:(NSArray *)hashes forHost:(NSString *)host;
 
 @end
+
+@class CPTLSConnection;
+
+/* all callbacks arrive on the main queue */
+@protocol CPTLSConnectionDelegate <NSObject>
+- (void)connectionDidOpen:(CPTLSConnection *)connection;
+- (void)connection:(CPTLSConnection *)connection didReceiveData:(NSData *)data;
+- (void)connection:(CPTLSConnection *)connection didCloseWithError:(NSError *)error;
+@end
+
+/* a long-lived socket for irc and websockets; tls uses the same ca bundle and host check as requests */
+@interface CPTLSConnection : NSObject
+
+@property (nonatomic, assign) id<CPTLSConnectionDelegate> delegate;
+@property (nonatomic, readonly) NSString *host;
+@property (nonatomic, readonly) int port;
+@property (nonatomic, readonly) BOOL useTLS;
+
+- (id)initWithHost:(NSString *)host port:(int)port useTLS:(BOOL)useTLS;
+- (void)open;
+- (void)sendData:(NSData *)data;
+/* no delegate callback follows a close the owner asked for */
+- (void)close;
+
+@end

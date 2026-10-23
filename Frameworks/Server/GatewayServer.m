@@ -498,7 +498,7 @@ static NSData *GWHTTPError(NSInteger status, NSString *text) {
     }
 
     /* Compute accept key */
-    NSString *guid = @"258EAFA5-E914-47DA-95CA-5AB5DC11695A";
+    NSString *guid = @"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     NSString *acceptSource = [NSString stringWithFormat:@"%@%@", wsKey, guid];
     NSData *acceptData = [acceptSource dataUsingEncoding:NSUTF8StringEncoding];
     uint8_t sha1[CC_SHA1_DIGEST_LENGTH];

@@ -1,17 +1,12 @@
-/*
- * OCIRCChannel.h
- * LegacyPodClaw - IRC Channel (RFC 2812)
- */
+/* irc client (rfc 2812) over plain tcp or wolfssl tls */
+
 #import <Foundation/Foundation.h>
 #import "ChannelManager.h"
+#import "TLSClient.h"
 
-@interface OCIRCChannel : NSObject <OCChannel, NSStreamDelegate>
-@property (nonatomic, copy) NSString *server;
-@property (nonatomic, assign) uint16_t port;       // Default 6667
-@property (nonatomic, copy) NSString *nickname;
-@property (nonatomic, copy) NSString *password;     // NickServ or server password
-@property (nonatomic, retain) NSArray *channels;    // #channel1, #channel2
-@property (nonatomic, assign) BOOL useTLS;
-@property (nonatomic, assign) id<OCChannelManagerDelegate> messageDelegate;
-- (instancetype)initWithServer:(NSString *)server nickname:(NSString *)nick;
+@interface OCIRCChannel : NSObject <OCChannel, CPTLSConnectionDelegate>
+@property (nonatomic, assign) id<OCChannelDelegate> messageDelegate;
+@property (nonatomic, copy) NSString *password;     // server password, often accepted by nickserv
+@property (nonatomic, retain) NSArray *channels;    // "#one", "#two"
+- (instancetype)initWithServer:(NSString *)server port:(int)port useTLS:(BOOL)useTLS nickname:(NSString *)nick;
 @end

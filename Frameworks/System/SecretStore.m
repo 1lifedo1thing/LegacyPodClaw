@@ -10,11 +10,20 @@
 
 @implementation CPSecretStore
 
+/* keep in step with the list in clawpodd, which refuses any other key */
++ (NSArray *)allSecretKeys {
+    return @[@"apiKey", @"authToken", @"authPassword", @"deviceToken",
+        @"openaiApiKey", @"googleApiKey", @"groqApiKey", @"togetherApiKey", @"openrouterApiKey",
+        @"mistralApiKey", @"deepseekApiKey", @"customApiKey",
+        @"telegramBotToken", @"discordBotToken", @"slackBotToken", @"slackAppToken",
+        @"ircPassword", @"webhookCallbackToken"];
+}
+
 + (BOOL)isSecretKey:(NSString *)key {
     static NSSet *keys;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        keys = [[NSSet alloc] initWithObjects:@"apiKey", @"authToken", @"authPassword", @"deviceToken", nil];
+        keys = [[NSSet alloc] initWithArray:[self allSecretKeys]];
     });
     return [key isKindOfClass:[NSString class]] && [keys containsObject:key];
 }

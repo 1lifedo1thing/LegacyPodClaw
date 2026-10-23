@@ -31,6 +31,13 @@
 }
 @end
 
+/* the generation five claude models think by default and accept an effort level */
+static BOOL LPCModelAlwaysThinks(NSString *model) {
+    for (NSString *family in @[@"claude-opus-5", @"claude-sonnet-5", @"claude-haiku-5", @"claude-fable-5"])
+        if ([model hasPrefix:family]) return YES;
+    return NO;
+}
+
 @implementation LegacyPodClawNCController
 
 - (UIView *)view {
@@ -192,7 +199,10 @@
 - (void)_sendQuery:(NSString *)query {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:PREFS_PATH];
     NSString *apiKey = [CPSecretStore secretForKey:@"apiKey"];
-    NSString *model = [prefs objectForKey:@"modelId"] ?: @"claude-sonnet-4-20250514";
+    /* the widget talks to anthropic only, so another provider's model id would be rejected */
+    NSString *provider = [prefs objectForKey:@"modelProvider"];
+    NSString *model = [prefs objectForKey:@"modelId"];
+    if ((provider && ![provider isEqualToString:@"anthropic"]) || [model length] == 0) model = @"claude-sonnet-5-5";
 
     if (!apiKey || [apiKey length] == 0) {
         [self _showResponse:@"Set an API key in Settings > LegacyPodClaw"];
@@ -223,14 +233,19 @@
     [req setValue:apiKey forHTTPHeaderField:@"x-api-key"];
     [req setValue:@"text/event-stream" forHTTPHeaderField:@"Accept"];
 
-    NSDictionary *body = @{
+    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithDictionary:@{
         @"model": model,
         @"max_tokens": @(256),
         @"stream": @YES,
         @"system": @"You are Molty, a concise AI in a Notification Center widget. "
                     "Maximum 2-3 sentences. Be extremely brief.",
         @"messages": @[@{@"role": @"user", @"content": query}]
-    };
+    }];
+    /* current models always think and pay for it from max_tokens, so give room and ask for little thought */
+    if (LPCModelAlwaysThinks(model)) {
+        [body setObject:@(2048) forKey:@"max_tokens"];
+        [body setObject:@{@"effort": @"low"} forKey:@"output_config"];
+    }
     [req setHTTPBody:[NSJSONSerialization dataWithJSONObject:body options:0 error:nil]];
 
     [_respData release];

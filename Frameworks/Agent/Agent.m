@@ -3,17 +3,16 @@
  * LegacyPodClaw - Lightweight Local Agent Runtime Implementation
  *
  * Inspired by PicoClaw: single-process, <10MB memory footprint.
- * Uses NSURLConnection for HTTP (iOS 6 compatible).
- * Handles streaming SSE responses for real-time output.
+ * Model calls go through OCProviderClient; every tool call goes through the dispatcher.
  */
 
 #import "Agent.h"
 #import "ToolDispatcher.h"
+#import "ProviderRegistry.h"
 #import <UIKit/UIKit.h>
 
 static const NSUInteger kDefaultMaxContext  = 4096;
 static const NSUInteger kDefaultMaxResponse = 1024;
-static const NSTimeInterval kDefaultTimeout = 120.0;
 
 #pragma mark - OCModelConfig
 
@@ -21,16 +20,15 @@ static const NSTimeInterval kDefaultTimeout = 120.0;
 
 - (instancetype)init {
     if ((self = [super init])) {
+        _providerId = [@"anthropic" copy];
         _maxTokens = kDefaultMaxResponse;
         _contextWindow = kDefaultMaxContext;
-        _temperature = 0.7f;
-        _timeout = kDefaultTimeout;
     }
     return self;
 }
 
 - (void)dealloc {
-    [_modelId release]; [_apiKey release]; [_baseURL release];
+    [_providerId release]; [_modelId release]; [_apiKey release]; [_baseURL release];
     [super dealloc];
 }
 
@@ -59,15 +57,24 @@ static const NSTimeInterval kDefaultTimeout = 120.0;
 
 @implementation OCAgentMessage
 
++ (OCAgentMessage *)messageWithRole:(OCAgentMessageRole)role content:(NSString *)content {
+    OCAgentMessage *m = [[[OCAgentMessage alloc] init] autorelease];
+    m.role = role;
+    m.content = content;
+    return m;
+}
+
 - (void)dealloc {
     [_content release]; [_toolName release]; [_toolCallId release];
-    [_toolInput release]; [_toolResult release];
+    [_toolInput release]; [_toolResult release]; [_toolCalls release]; [_rawContent release];
     [super dealloc];
 }
 
 - (NSUInteger)estimatedTokens {
     if (_estimatedTokens > 0) return _estimatedTokens;
-    return [OCAgent estimateTokens:_content];
+    NSUInteger n = [OCAgent estimateTokens:_content];
+    for (OCProviderToolCall *c in _toolCalls) n += 16 + [[c.input description] length] / 4;
+    return n;
 }
 
 @end
@@ -125,13 +132,13 @@ static const NSTimeInterval kDefaultTimeout = 120.0;
                                        queue:[NSOperationQueue mainQueue]
                            completionHandler:^(NSURLResponse *resp, NSData *data, NSError *error) {
         if (error) {
-            callback(NO, error);
+            if (callback) callback(NO, error);
             return;
         }
         _isConnected = YES;
         /* Fetch tool list */
         [self listTools:^(NSArray *tools, NSError *err) {
-            callback(err == nil, err);
+            if (callback) callback(err == nil, err);
         }];
     }];
 }
@@ -198,11 +205,20 @@ static const NSTimeInterval kDefaultTimeout = 120.0;
         NSArray *tools = [[result objectForKey:@"result"] objectForKey:@"tools"];
         [_tools removeAllObjects];
 
+        /* the handler must not retain the client, which owns the tool */
+        __block OCMCPClient *client = self;
         for (NSDictionary *t in tools) {
+            if (![t isKindOfClass:[NSDictionary class]] || ![[t objectForKey:@"name"] isKindOfClass:[NSString class]]) continue;
             OCToolDefinition *tool = [[OCToolDefinition alloc] init];
             tool.name = [t objectForKey:@"name"];
             tool.toolDescription = [t objectForKey:@"description"];
             tool.inputSchema = [t objectForKey:@"inputSchema"];
+            /* a remote tool server can do anything, so the user approves each call */
+            tool.requiresConfirmation = YES;
+            NSString *name = tool.name;
+            tool.handler = ^(NSDictionary *params, OCToolResultBlock callback) {
+                [client callTool:name params:params callback:callback];
+            };
             [_tools addObject:tool];
             [tool release];
         }
@@ -212,172 +228,18 @@ static const NSTimeInterval kDefaultTimeout = 120.0;
 
 @end
 
-#pragma mark - OCModelHTTPClient
-
-@interface OCModelHTTPClient () {
-    NSURLConnection *_connection;
-    NSMutableData *_responseData;
-    NSString *_sseBuffer;
-    void(^_onChunk)(NSDictionary *);
-    void(^_onComplete)(NSDictionary *, NSError *);
-    BOOL _isStreaming;
-}
-@end
-
-@implementation OCModelHTTPClient
-
-- (instancetype)initWithBaseURL:(NSString *)baseURL apiKey:(NSString *)apiKey {
-    if ((self = [super init])) {
-        _baseURL = [baseURL copy];
-        _apiKey = [apiKey copy];
-        _timeout = kDefaultTimeout;
-    }
-    return self;
-}
-
-- (void)dealloc {
-    [self cancel];
-    [_baseURL release]; [_apiKey release];
-    [_responseData release]; [_sseBuffer release];
-    [_onChunk release]; [_onComplete release];
-    [super dealloc];
-}
-
-- (void)chatCompletion:(NSDictionary *)requestBody
-               onChunk:(void(^)(NSDictionary *))onChunk
-            completion:(void(^)(NSDictionary *, NSError *))completion {
-
-    [_onChunk release]; _onChunk = [onChunk copy];
-    [_onComplete release]; _onComplete = [completion copy];
-    _isStreaming = YES;
-
-    NSMutableDictionary *body = [requestBody mutableCopy];
-    [body setObject:@YES forKey:@"stream"];
-
-    [self _sendRequest:body];
-    [body release];
-}
-
-- (void)chatCompletionSync:(NSDictionary *)requestBody
-                completion:(void(^)(NSDictionary *, NSError *))completion {
-    [_onComplete release]; _onComplete = [completion copy];
-    _isStreaming = NO;
-
-    [self _sendRequest:requestBody];
-}
-
-- (void)_sendRequest:(NSDictionary *)body {
-    NSString *urlStr = [NSString stringWithFormat:@"%@/v1/messages", _baseURL];
-    NSURL *url = [NSURL URLWithString:urlStr];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
-                                                          cachePolicy:NSURLRequestReloadIgnoringCacheData
-                                                      timeoutInterval:_timeout];
-    [request setHTTPMethod:@"POST"];
-    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    [request setValue:@"2023-06-01" forHTTPHeaderField:@"anthropic-version"];
-
-    if (_apiKey) {
-        [request setValue:_apiKey forHTTPHeaderField:@"x-api-key"];
-    }
-
-    if (_isStreaming) {
-        [request setValue:@"text/event-stream" forHTTPHeaderField:@"Accept"];
-    }
-
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
-    [request setHTTPBody:jsonData];
-
-    [_responseData release];
-    _responseData = [[NSMutableData alloc] initWithCapacity:4096];
-    [_sseBuffer release];
-    _sseBuffer = [[NSString alloc] init];
-
-    [_connection cancel];
-    _connection = [[NSURLConnection alloc] initWithRequest:request delegate:self startImmediately:YES];
-}
-
-- (void)cancel {
-    [_connection cancel];
-    [_connection release]; _connection = nil;
-}
-
-#pragma mark NSURLConnectionDataDelegate
-
-- (void)connection:(NSURLConnection *)connection didReceiveData:(NSData *)data {
-    if (_isStreaming) {
-        /* Parse SSE events */
-        NSString *chunk = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        NSString *combined = [_sseBuffer stringByAppendingString:chunk];
-        [chunk release];
-
-        NSArray *lines = [combined componentsSeparatedByString:@"\n"];
-        NSMutableString *incomplete = [NSMutableString string];
-
-        for (NSUInteger i = 0; i < [lines count]; i++) {
-            NSString *line = [lines objectAtIndex:i];
-
-            /* Last element might be incomplete */
-            if (i == [lines count] - 1 && ![combined hasSuffix:@"\n"]) {
-                [incomplete appendString:line];
-                continue;
-            }
-
-            if ([line hasPrefix:@"data: "]) {
-                NSString *jsonStr = [line substringFromIndex:6];
-                if ([jsonStr isEqualToString:@"[DONE]"]) continue;
-
-                NSData *jsonData = [jsonStr dataUsingEncoding:NSUTF8StringEncoding];
-                NSDictionary *event = [NSJSONSerialization JSONObjectWithData:jsonData
-                                                                     options:0 error:nil];
-                if (event && _onChunk) {
-                    _onChunk(event);
-                }
-            }
-        }
-
-        [_sseBuffer release];
-        _sseBuffer = [incomplete copy];
-    } else {
-        [_responseData appendData:data];
-    }
-}
-
-- (void)connectionDidFinishLoading:(NSURLConnection *)connection {
-    if (!_isStreaming && _onComplete) {
-        NSDictionary *result = [NSJSONSerialization JSONObjectWithData:_responseData
-                                                              options:0 error:nil];
-        _onComplete(result, nil);
-    } else if (_isStreaming && _onComplete) {
-        _onComplete(nil, nil);
-    }
-
-    [self _cleanup];
-}
-
-- (void)connection:(NSURLConnection *)connection didFailWithError:(NSError *)error {
-    if (_onComplete) {
-        _onComplete(nil, error);
-    }
-    [self _cleanup];
-}
-
-- (void)_cleanup {
-    [_connection release]; _connection = nil;
-    [_responseData release]; _responseData = nil;
-    [_onChunk release]; _onChunk = nil;
-    [_onComplete release]; _onComplete = nil;
-}
-
-@end
-
 #pragma mark - OCAgent
+
+static const NSUInteger kMaxToolRounds = 8;
 
 @interface OCAgent () {
     NSMutableArray *_tools;
     NSMutableArray *_mcpServers;
     NSMutableArray *_contextMessages;
-    OCModelHTTPClient *_httpClient;
-    BOOL _aborted;
+    OCProviderClient *_client;
+    NSMutableString *_runText;
+    NSUInteger _generation;
+    NSUInteger _rounds;
 }
 @end
 
@@ -388,21 +250,34 @@ static const NSTimeInterval kDefaultTimeout = 120.0;
         _tools = [[NSMutableArray alloc] initWithCapacity:8];
         _mcpServers = [[NSMutableArray alloc] initWithCapacity:2];
         _contextMessages = [[NSMutableArray alloc] initWithCapacity:32];
+        _runText = [[NSMutableString alloc] init];
         _maxContextTokens = kDefaultMaxContext;
         _maxResponseTokens = kDefaultMaxResponse;
+        _toolsEnabled = YES;
+        _toolCaller = OCToolCallerAgent;
     }
     return self;
 }
 
 - (void)dealloc {
+    [_client cancel];
     [_tools release]; [_mcpServers release]; [_contextMessages release];
-    [_httpClient release]; [_modelConfig release]; [_systemPrompt release];
+    [_client release]; [_modelConfig release]; [_systemPrompt release]; [_runText release];
     [super dealloc];
+}
+
+- (void)setModelConfig:(OCModelConfig *)config {
+    if (config == _modelConfig) return;
+    [_modelConfig release];
+    _modelConfig = [config retain];
+    /* the next round builds a client for the new provider; a reply in flight still finishes on the old one */
+    [_client release]; _client = nil;
 }
 
 #pragma mark - Tool Management
 
 - (void)registerTool:(OCToolDefinition *)tool {
+    if (!tool.name || [OCToolDispatcher toolNamed:tool.name inTools:_tools]) return;
     [_tools addObject:tool];
 }
 
@@ -418,6 +293,16 @@ static const NSTimeInterval kDefaultTimeout = 120.0;
 
 - (NSArray *)registeredTools {
     return [[_tools copy] autorelease];
+}
+
+- (NSArray *)availableTools {
+    NSMutableArray *all = [NSMutableArray arrayWithArray:_tools];
+    for (OCMCPClient *mcp in _mcpServers) {
+        for (OCToolDefinition *t in mcp.availableTools) {
+            if (![OCToolDispatcher toolNamed:t.name inTools:all]) [all addObject:t];
+        }
+    }
+    return all;
 }
 
 - (void)addMCPServer:(OCMCPClient *)server {
@@ -437,214 +322,143 @@ static const NSTimeInterval kDefaultTimeout = 120.0;
 #pragma mark - Agent Loop
 
 - (void)processMessage:(NSString *)userMessage {
-    [self processMessage:userMessage withContext:nil];
-}
-
-- (void)processMessage:(NSString *)userMessage withContext:(NSArray *)additionalMessages {
-    if (_isProcessing) return;
+    if (_isProcessing || [userMessage length] == 0) return;
     _isProcessing = YES;
-    _aborted = NO;
+    _generation++;
+    _rounds = 0;
+    [_runText setString:@""];
 
-    /* Add user message to context */
-    OCAgentMessage *userMsg = [[OCAgentMessage alloc] init];
-    userMsg.role = OCAgentRoleUser;
-    userMsg.content = userMessage;
-    [_contextMessages addObject:userMsg];
-    [userMsg release];
-
-    if (additionalMessages) {
-        [_contextMessages addObjectsFromArray:additionalMessages];
-    }
-
-    /* Compact if over budget */
+    [_contextMessages addObject:[OCAgentMessage messageWithRole:OCAgentRoleUser content:userMessage]];
     [self compactContext];
-
-    /* Start the agent loop */
     [self _runAgentLoop];
 }
 
+- (OCProviderClient *)_providerClient {
+    if (_client) return _client;
+    OCProviderInfo *info = [OCProviderInfo providerWithId:_modelConfig.providerId]
+                        ?: [OCProviderInfo providerWithId:[OCProviderInfo defaultProviderId]];
+    _client = [[OCProviderClient alloc] initWithInfo:info apiKey:_modelConfig.apiKey baseURL:_modelConfig.baseURL];
+    return _client;
+}
+
+- (NSArray *)_conversation {
+    NSMutableArray *msgs = [NSMutableArray arrayWithCapacity:[_contextMessages count]];
+    for (OCAgentMessage *m in _contextMessages) if (m.role != OCAgentRoleSystem) [msgs addObject:m];
+    return msgs;
+}
+
+- (NSString *)_systemText {
+    NSMutableString *sys = [NSMutableString stringWithString:_systemPrompt ?: @""];
+    for (OCAgentMessage *m in _contextMessages) {
+        if (m.role == OCAgentRoleSystem && [m.content length]) [sys appendFormat:@"\n\n%@", m.content];
+    }
+    return sys;
+}
+
+- (void)_finishWithText:(NSString *)text {
+    _isProcessing = NO;
+    [_delegate agent:self didProduceText:text ?: @"" isFinal:YES];
+}
+
 - (void)_runAgentLoop {
-    if (_aborted) {
-        _isProcessing = NO;
-        return;
+    if (!_isProcessing) return;
+    NSUInteger gen = _generation;
+    OCProviderClient *client = [self _providerClient];
+    NSUInteger maxTokens = _modelConfig.maxTokens ?: _maxResponseTokens;
+
+    [client streamWithModel:_modelConfig.modelId
+                     system:[self _systemText]
+                   messages:[self _conversation]
+                      tools:_toolsEnabled ? [self availableTools] : nil
+                  maxTokens:maxTokens
+                     onText:^(NSString *delta) {
+        if (gen == _generation) [_delegate agent:self didProduceText:delta isFinal:NO];
     }
-
-    /* Build API request */
-    NSDictionary *requestBody = [self _buildRequestBody];
-
-    /* Create HTTP client if needed */
-    if (!_httpClient) {
-        NSString *baseURL = _modelConfig.baseURL ?: @"https://api.anthropic.com";
-        _httpClient = [[OCModelHTTPClient alloc] initWithBaseURL:baseURL
-                                                         apiKey:_modelConfig.apiKey];
-        _httpClient.timeout = _modelConfig.timeout;
-    }
-
-    __block NSMutableString *accumulated = [[NSMutableString alloc] init];
-    __block NSMutableArray *toolCalls = [[NSMutableArray alloc] init];
-
-    [_httpClient chatCompletion:requestBody
-                        onChunk:^(NSDictionary *chunk) {
-        if (_aborted) return;
-
-        NSString *type = [chunk objectForKey:@"type"];
-
-        if ([type isEqualToString:@"content_block_delta"]) {
-            NSDictionary *delta = [chunk objectForKey:@"delta"];
-            NSString *deltaType = [delta objectForKey:@"type"];
-
-            if ([deltaType isEqualToString:@"text_delta"]) {
-                NSString *text = [delta objectForKey:@"text"];
-                if (text) {
-                    [accumulated appendString:text];
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [_delegate agent:self didProduceText:text isFinal:NO];
-                    });
-                }
-            } else if ([deltaType isEqualToString:@"input_json_delta"]) {
-                /* Tool use input streaming */
-            }
-        } else if ([type isEqualToString:@"content_block_start"]) {
-            NSDictionary *block = [chunk objectForKey:@"content_block"];
-            if ([[block objectForKey:@"type"] isEqualToString:@"tool_use"]) {
-                [toolCalls addObject:[block mutableCopy]];
-            }
-        } else if ([type isEqualToString:@"message_delta"]) {
-            NSDictionary *usage = [chunk objectForKey:@"usage"];
-            if (usage) {
-                NSUInteger input = [[usage objectForKey:@"input_tokens"] unsignedIntegerValue];
-                NSUInteger output = [[usage objectForKey:@"output_tokens"] unsignedIntegerValue];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    if ([_delegate respondsToSelector:@selector(agent:tokenUsage:output:)]) {
-                        [_delegate agent:self tokenUsage:input output:output];
-                    }
-                });
-            }
-        }
-    }
-                     completion:^(NSDictionary *fullResponse, NSError *error) {
+                 completion:^(OCProviderResult *result, NSError *error) {
+        if (gen != _generation) return;
         if (error) {
             _isProcessing = NO;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [_delegate agent:self didFailWithError:error];
-            });
-            [accumulated release];
-            [toolCalls release];
+            [_delegate agent:self didFailWithError:error];
             return;
         }
+        if ([_delegate respondsToSelector:@selector(agent:tokenUsage:output:)])
+            [_delegate agent:self tokenUsage:result.inputTokens output:result.outputTokens];
 
-        /* Add assistant message to context */
-        if ([accumulated length] > 0) {
-            OCAgentMessage *assistantMsg = [[OCAgentMessage alloc] init];
-            assistantMsg.role = OCAgentRoleAssistant;
-            assistantMsg.content = [[accumulated copy] autorelease];
-            [_contextMessages addObject:assistantMsg];
-            [assistantMsg release];
+        if ([result.text length] || [result.toolCalls count]) {
+            OCAgentMessage *assistant = [OCAgentMessage messageWithRole:OCAgentRoleAssistant content:result.text];
+            assistant.toolCalls = result.toolCalls;
+            if (client.info.format == OCProviderFormatAnthropic) assistant.rawContent = result.rawContent;
+            [_contextMessages addObject:assistant];
+        }
+        if ([result.text length]) {
+            if ([_runText length]) [_runText appendString:@"\n\n"];
+            [_runText appendString:result.text];
         }
 
-        /* Handle tool calls */
-        if ([toolCalls count] > 0) {
-            [self _executeToolCalls:toolCalls completion:^{
-                /* Continue agent loop after tool execution */
-                [self _runAgentLoop];
-            }];
-        } else {
-            /* No tool calls - we're done */
-            _isProcessing = NO;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [_delegate agent:self didProduceText:accumulated isFinal:YES];
-            });
+        NSString *stop = result.stopReason;
+        BOOL cutOff = [stop isEqualToString:@"max_tokens"] || [stop isEqualToString:@"length"];
+        if ([result.toolCalls count] && !cutOff && _rounds < kMaxToolRounds) {
+            _rounds++;
+            [self _executeToolCalls:result.toolCalls index:0 generation:gen];
+            return;
         }
-
-        [accumulated release];
-        [toolCalls release];
+        if ([result.toolCalls count]) {
+            /* every tool call needs a result before the next user turn, or the provider rejects the history */
+            for (OCProviderToolCall *call in result.toolCalls)
+                [self _addToolResult:@"Not run: the turn ended first." isError:YES call:call];
+            [_runText appendString:cutOff ? @"\n\n[The reply hit the token limit before its tool calls could run.]"
+                                          : @"\n\n[Stopped after too many tool rounds.]"];
+        }
+        if ([stop isEqualToString:@"refusal"] && [_runText length] == 0)
+            [_runText setString:@"The model declined this request."];
+        [self _finishWithText:[[_runText copy] autorelease]];
     }];
 }
 
-- (void)_executeToolCalls:(NSArray *)toolCalls completion:(void(^)(void))completion {
-    __block NSUInteger remaining = [toolCalls count];
+/* runs calls one at a time, so two confirmation dialogs never stack */
+- (void)_executeToolCalls:(NSArray *)calls index:(NSUInteger)index generation:(NSUInteger)gen {
+    if (gen != _generation) return;
+    if (index >= [calls count]) { [self _runAgentLoop]; return; }
 
-    for (NSDictionary *call in toolCalls) {
-        NSString *toolName = [call objectForKey:@"name"];
-        NSString *toolId = [call objectForKey:@"id"];
-        NSDictionary *input = [call objectForKey:@"input"] ?: @{};
+    OCProviderToolCall *call = [calls objectAtIndex:index];
+    void (^next)(void) = ^{ [self _executeToolCalls:calls index:index + 1 generation:gen]; };
 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if ([_delegate respondsToSelector:@selector(agent:willInvokeTool:withParams:)]) {
-                [_delegate agent:self willInvokeTool:toolName withParams:input];
-            }
-        });
-
-        /* local tools first, then mcp servers */
-        OCToolDefinition *localTool = [OCToolDispatcher toolNamed:toolName inTools:_tools];
-
-        if (localTool && localTool.handler) {
-            [[OCToolDispatcher shared] runTool:localTool input:input caller:OCToolCallerAgent
-                                    completion:^(NSString *result, NSError *error) {
-                [self _addToolResult:result error:error toolId:toolId toolName:toolName];
-                if (--remaining == 0) completion();
-            }];
-        } else {
-            /* Try MCP servers */
-            BOOL found = NO;
-            for (OCMCPClient *mcp in _mcpServers) {
-                for (OCToolDefinition *t in mcp.availableTools) {
-                    if ([t.name isEqualToString:toolName]) {
-                        [mcp callTool:toolName params:input callback:^(id result, NSError *error) {
-                            [self _addToolResult:result error:error toolId:toolId toolName:toolName];
-                            if (--remaining == 0) completion();
-                        }];
-                        found = YES;
-                        break;
-                    }
-                }
-                if (found) break;
-            }
-
-            if (!found) {
-                [self _addToolResult:@"Tool not found" error:nil toolId:toolId toolName:toolName];
-                if (--remaining == 0) completion();
-            }
-        }
+    if (!call.input) {
+        [self _addToolResult:@"Error: the tool arguments were not a valid JSON object." isError:YES call:call];
+        next();
+        return;
     }
+    OCToolDefinition *tool = [OCToolDispatcher toolNamed:call.name inTools:[self availableTools]];
+    if (!tool) {
+        [self _addToolResult:[NSString stringWithFormat:@"Error: no tool named %@.", call.name] isError:YES call:call];
+        next();
+        return;
+    }
+    if ([_delegate respondsToSelector:@selector(agent:willInvokeTool:withParams:)])
+        [_delegate agent:self willInvokeTool:call.name withParams:call.input];
+
+    [[OCToolDispatcher shared] runTool:tool input:call.input caller:_toolCaller
+                            completion:^(NSString *result, NSError *error) {
+        if (gen != _generation) return;
+        NSString *text = error ? [NSString stringWithFormat:@"Error: %@", [error localizedDescription]] : result;
+        [self _addToolResult:text isError:error != nil call:call];
+        if ([_delegate respondsToSelector:@selector(agent:didInvokeTool:result:)])
+            [_delegate agent:self didInvokeTool:call.name result:text];
+        next();
+    }];
 }
 
-- (void)_addToolResult:(id)result error:(NSError *)error
-                toolId:(NSString *)toolId toolName:(NSString *)toolName {
-    OCAgentMessage *toolMsg = [[OCAgentMessage alloc] init];
-    toolMsg.role = OCAgentRoleTool;
-    toolMsg.toolCallId = toolId;
-    toolMsg.toolName = toolName;
-
-    if (error) {
-        toolMsg.toolResult = [NSString stringWithFormat:@"Error: %@",
-                              [error localizedDescription]];
-    } else {
-        toolMsg.toolResult = result;
-    }
-
-    NSString *resultStr;
-    if ([result isKindOfClass:[NSString class]]) {
-        resultStr = result;
-    } else {
-        NSData *json = [NSJSONSerialization dataWithJSONObject:result ?: @{} options:0 error:nil];
-        resultStr = [[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] autorelease];
-    }
-    toolMsg.content = resultStr;
-
-    [_contextMessages addObject:toolMsg];
-    [toolMsg release];
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if ([_delegate respondsToSelector:@selector(agent:didInvokeTool:result:)]) {
-            [_delegate agent:self didInvokeTool:toolName result:result];
-        }
-    });
+- (void)_addToolResult:(NSString *)text isError:(BOOL)isError call:(OCProviderToolCall *)call {
+    OCAgentMessage *msg = [OCAgentMessage messageWithRole:OCAgentRoleTool content:text ?: @""];
+    msg.toolCallId = call.callId;
+    msg.toolName = call.name;
+    msg.isError = isError;
+    [_contextMessages addObject:msg];
 }
 
 - (void)abort {
-    _aborted = YES;
-    [_httpClient cancel];
+    _generation++;
+    [_client cancel];
     _isProcessing = NO;
 }
 
@@ -655,114 +469,51 @@ static const NSTimeInterval kDefaultTimeout = 120.0;
     _currentContextTokens = 0;
 }
 
+- (void)loadHistory:(NSArray *)messages {
+    [_contextMessages removeAllObjects];
+    for (id m in messages) if ([m isKindOfClass:[OCAgentMessage class]]) [_contextMessages addObject:m];
+    [self compactContext];
+}
+
 - (void)addSystemMessage:(NSString *)message {
-    OCAgentMessage *msg = [[OCAgentMessage alloc] init];
-    msg.role = OCAgentRoleSystem;
-    msg.content = message;
-    [_contextMessages insertObject:msg atIndex:0];
-    [msg release];
+    [_contextMessages insertObject:[OCAgentMessage messageWithRole:OCAgentRoleSystem content:message] atIndex:0];
 }
 
 - (NSArray *)contextMessages {
     return [[_contextMessages copy] autorelease];
 }
 
-- (void)compactContext {
-    /* Calculate current token usage */
-    NSUInteger total = 0;
-    for (OCAgentMessage *msg in _contextMessages) {
-        total += [msg estimatedTokens];
-    }
-    _currentContextTokens = total;
-
-    /* Remove oldest non-system messages if over budget */
-    while (_currentContextTokens > _maxContextTokens && [_contextMessages count] > 2) {
-        /* Find first non-system message */
-        for (NSUInteger i = 0; i < [_contextMessages count]; i++) {
-            OCAgentMessage *msg = [_contextMessages objectAtIndex:i];
-            if (msg.role != OCAgentRoleSystem) {
-                _currentContextTokens -= [msg estimatedTokens];
-                [_contextMessages removeObjectAtIndex:i];
-                break;
-            }
-        }
-    }
+- (NSUInteger)_firstTurnIndex {
+    NSUInteger i = 0;
+    while (i < [_contextMessages count] && [(OCAgentMessage *)[_contextMessages objectAtIndex:i] role] == OCAgentRoleSystem) i++;
+    return i;
 }
 
-#pragma mark - Request Building
+- (void)compactContext {
+    NSUInteger total = 0;
+    for (OCAgentMessage *msg in _contextMessages) total += [msg estimatedTokens];
+    _currentContextTokens = total;
 
-- (NSDictionary *)_buildRequestBody {
-    NSMutableArray *messages = [NSMutableArray arrayWithCapacity:[_contextMessages count]];
-
-    for (OCAgentMessage *msg in _contextMessages) {
-        if (msg.role == OCAgentRoleSystem) continue; /* System prompt handled separately */
-
-        NSMutableDictionary *msgDict = [NSMutableDictionary dictionary];
-
-        switch (msg.role) {
-            case OCAgentRoleUser:
-                [msgDict setObject:@"user" forKey:@"role"];
-                [msgDict setObject:msg.content ?: @"" forKey:@"content"];
-                break;
-            case OCAgentRoleAssistant:
-                [msgDict setObject:@"assistant" forKey:@"role"];
-                [msgDict setObject:msg.content ?: @"" forKey:@"content"];
-                break;
-            case OCAgentRoleTool:
-                [msgDict setObject:@"user" forKey:@"role"];
-                [msgDict setObject:@[
-                    @{
-                        @"type": @"tool_result",
-                        @"tool_use_id": msg.toolCallId ?: @"",
-                        @"content": msg.content ?: @""
-                    }
-                ] forKey:@"content"];
-                break;
-            default: break;
-        }
-
-        [messages addObject:msgDict];
+    NSUInteger budget = _maxContextTokens ?: kDefaultMaxContext;
+    BOOL trimmed = NO;
+    while (_currentContextTokens > budget) {
+        NSUInteger i = [self _firstTurnIndex];
+        /* always keep the newest message, the turn being answered */
+        if (i + 1 >= [_contextMessages count]) break;
+        _currentContextTokens -= MIN(_currentContextTokens, [(OCAgentMessage *)[_contextMessages objectAtIndex:i] estimatedTokens]);
+        [_contextMessages removeObjectAtIndex:i];
+        trimmed = YES;
     }
-
-    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithCapacity:8];
-    [body setObject:_modelConfig.modelId ?: @"claude-sonnet-4-20250514" forKey:@"model"];
-    [body setObject:messages forKey:@"messages"];
-    [body setObject:@(_modelConfig.maxTokens) forKey:@"max_tokens"];
-
-    if (_systemPrompt) {
-        [body setObject:_systemPrompt forKey:@"system"];
+    if (!trimmed) return;
+    /* the history must open on a user turn, never on an orphaned tool result or reply */
+    while (YES) {
+        NSUInteger i = [self _firstTurnIndex];
+        if (i + 1 >= [_contextMessages count]) break;
+        OCAgentMessage *first = [_contextMessages objectAtIndex:i];
+        if (first.role == OCAgentRoleUser) break;
+        _currentContextTokens -= MIN(_currentContextTokens, [first estimatedTokens]);
+        [_contextMessages removeObjectAtIndex:i];
     }
-
-    if (_modelConfig.temperature > 0) {
-        [body setObject:@(_modelConfig.temperature) forKey:@"temperature"];
-    }
-
-    /* Add tool definitions */
-    if ([_tools count] > 0 || [_mcpServers count] > 0) {
-        NSMutableArray *toolDefs = [NSMutableArray array];
-
-        for (OCToolDefinition *tool in _tools) {
-            [toolDefs addObject:@{
-                @"name": tool.name,
-                @"description": tool.toolDescription ?: @"",
-                @"input_schema": tool.inputSchema ?: @{@"type": @"object"}
-            }];
-        }
-
-        for (OCMCPClient *mcp in _mcpServers) {
-            for (OCToolDefinition *tool in mcp.availableTools) {
-                [toolDefs addObject:@{
-                    @"name": tool.name,
-                    @"description": tool.toolDescription ?: @"",
-                    @"input_schema": tool.inputSchema ?: @{@"type": @"object"}
-                }];
-            }
-        }
-
-        [body setObject:toolDefs forKey:@"tools"];
-    }
-
-    return body;
 }
 
 #pragma mark - Token Estimation

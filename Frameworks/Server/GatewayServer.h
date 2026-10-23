@@ -27,13 +27,10 @@
 @property (nonatomic, assign) NSTimeInterval tickInterval; // Default 30s
 
 /* Agent config */
+@property (nonatomic, copy) NSString *defaultProviderId;
 @property (nonatomic, copy) NSString *defaultModelId;
 @property (nonatomic, copy) NSString *defaultApiKey;
 @property (nonatomic, copy) NSString *defaultBaseURL;
-
-/* Telegram channel (optional) */
-@property (nonatomic, copy) NSString *telegramBotToken;
-@property (nonatomic, copy) NSArray *telegramAllowedChatIds;
 @end
 
 #pragma mark - Connected Client
@@ -146,9 +143,8 @@
 - (void)removeCronJob:(NSString *)jobId;
 - (NSArray *)cronJobs;
 
-/* Telegram channel */
-- (void)startTelegramChannel;
-- (void)stopTelegramChannel;
+/* the authenticated POST /webhook/incoming route hands its json body here; return nil to accept it */
+@property (nonatomic, copy) NSString *(^webhookHandler)(NSDictionary *payload);
 
 /* Health */
 - (NSDictionary *)healthStatus;

@@ -33,7 +33,11 @@ static mach_port_t _servicePort = MACH_PORT_NULL;
 static dispatch_source_t _source = NULL;
 
 static NSArray *SecretKeys(void) {
-    return @[@"apiKey", @"authToken", @"authPassword", @"deviceToken"];
+    return @[@"apiKey", @"authToken", @"authPassword", @"deviceToken",
+             @"openaiApiKey", @"googleApiKey", @"groqApiKey", @"togetherApiKey", @"openrouterApiKey",
+             @"mistralApiKey", @"deepseekApiKey", @"customApiKey",
+             @"telegramBotToken", @"discordBotToken", @"slackBotToken", @"slackAppToken",
+             @"ircPassword", @"webhookCallbackToken"];
 }
 
 #pragma mark - Keychain

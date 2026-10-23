@@ -19,6 +19,7 @@ LegacyPodClaw_FILES = \
 	Classes/UI/ChatCell.m \
 	Classes/UI/SessionListViewController.m \
 	Classes/UI/SettingsViewController.m \
+	Classes/UI/ChannelSettingsViewController.m \
 	Classes/Utils/Logger.m \
 	Classes/Services/ConnectionService.m \
 	Classes/Services/VoiceService.m \
@@ -33,12 +34,15 @@ LegacyPodClaw_FILES = \
 	Frameworks/Server/GatewayToken.m \
 	Frameworks/Server/ServerWebSocket.m \
 	Frameworks/Channels/ChannelManager.m \
+	Frameworks/Channels/ChannelRouter.m \
+	Frameworks/Channels/TLSWebSocket.m \
 	Frameworks/Channels/TelegramChannel.m \
 	Frameworks/Channels/DiscordChannel.m \
 	Frameworks/Channels/IRCChannel.m \
 	Frameworks/Channels/SlackChannel.m \
 	Frameworks/Channels/WebhookChannel.m \
 	Frameworks/Providers/ProviderRegistry.m \
+	Frameworks/Providers/ProviderFormats.m \
 	Frameworks/Tools/ExtendedTools.m \
 	Frameworks/Media/MediaPipeline.m \
 	Frameworks/Plugin/PluginSDK.m \

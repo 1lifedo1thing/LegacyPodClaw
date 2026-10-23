@@ -1,92 +1,191 @@
-/*
- * OCSlackChannel.m
- * LegacyPodClaw - Slack Channel Implementation
- */
+/* slack socket mode client; channel messages are answered only when the app is mentioned */
 
 #import "SlackChannel.h"
+#import "TLSClient.h"
 
 static NSString *const kSlackAPI = @"https://slack.com/api";
+static const NSUInteger kSlackMaxChars = 3500;
 
-@interface OCSlackChannel () { BOOL _running, _connected; }
+@interface OCSlackChannel () {
+    NSString *_appToken;
+    NSString *_botToken;
+    NSString *_botUserId;
+    OCTLSWebSocket *_ws;
+    BOOL _running, _connected;
+    NSUInteger _generation;
+    NSTimeInterval _backoff;
+    NSString *_lastError;
+}
 @end
 
 @implementation OCSlackChannel
-@synthesize channelId = _channelId;
-@synthesize isConnected = _connected;
 
-- (instancetype)initWithBotToken:(NSString *)token {
+@synthesize messageDelegate = _messageDelegate;
+
+- (instancetype)initWithAppToken:(NSString *)appToken botToken:(NSString *)botToken {
     if ((self = [super init])) {
-        _botToken = [token copy]; _channelId = @"slack";
+        _appToken = [appToken copy];
+        _botToken = [botToken copy];
     }
     return self;
 }
-- (void)dealloc { [_botToken release]; [_incomingWebhookURL release]; [super dealloc]; }
-- (BOOL)isConfigured { return (_botToken && [_botToken length] > 0) || _incomingWebhookURL; }
 
-- (void)start { _running = YES; _connected = YES; }
-- (void)stop { _running = NO; _connected = NO; }
+- (void)dealloc {
+    [self _teardown];
+    [_appToken release]; [_botToken release]; [_botUserId release]; [_lastError release];
+    [super dealloc];
+}
 
-- (void)handleWebhookPayload:(NSDictionary *)payload {
-    NSString *type = [payload objectForKey:@"type"];
-    if ([type isEqualToString:@"url_verification"]) return; /* Challenge */
+- (NSString *)channelId { return @"slack"; }
+- (BOOL)isConnected { return _connected; }
+- (BOOL)isConfigured { return [_appToken length] > 0 && [_botToken length] > 0; }
 
-    NSDictionary *event = [payload objectForKey:@"event"];
-    if (!event) return;
-    NSString *eventType = [event objectForKey:@"type"];
-    if (![eventType isEqualToString:@"message"]) return;
-    if ([event objectForKey:@"bot_id"]) return; /* Skip bot messages */
+- (void)start {
+    if (_running || ![self isConfigured]) return;
+    _running = YES;
+    _backoff = 0;
+    [self _connect];
+}
 
-    OCChannelMessage *msg = [[[OCChannelMessage alloc] init] autorelease];
-    msg.channelId = @"slack";
-    msg.chatId = [event objectForKey:@"channel"];
-    msg.senderId = [event objectForKey:@"user"];
-    msg.text = [event objectForKey:@"text"];
-    msg.messageId = [event objectForKey:@"ts"];
-    msg.threadId = [event objectForKey:@"thread_ts"];
-    msg.isGroup = YES;
+- (void)stop {
+    _running = NO;
+    _generation++;
+    [self _teardown];
+}
 
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [_messageDelegate channelManager:nil didReceiveMessage:msg];
+- (void)_teardown {
+    _connected = NO;
+    _ws.delegate = nil;
+    [_ws close];
+    [_ws release]; _ws = nil;
+}
+
+- (void)_setError:(NSString *)error {
+    [_lastError release];
+    _lastError = [error copy];
+}
+
+- (void)_retry:(NSString *)reason {
+    [self _teardown];
+    [self _setError:reason];
+    if (!_running) return;
+    _backoff = MIN(MAX(_backoff * 2, 3.0), 120.0);
+    NSUInteger gen = ++_generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(_backoff * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (gen == _generation && _running) [self _connect];
     });
 }
 
-- (void)sendMessage:(NSString *)text toChatId:(NSString *)chatId {
-    [self sendMessage:text toChatId:chatId threadId:nil];
+- (void)_connect {
+    [self _teardown];
+    NSUInteger gen = ++_generation;
+    NSDictionary *botAuth = @{@"Authorization": [@"Bearer " stringByAppendingString:_botToken]};
+    [CPTLSClient postJSON:[kSlackAPI stringByAppendingString:@"/auth.test"] headers:botAuth body:@{}
+               completion:^(NSDictionary *json, NSError *error) {
+        if (gen != _generation) return;
+        if (error || ![[json objectForKey:@"ok"] boolValue]) {
+            [self _retry:error ? [error localizedDescription] : [NSString stringWithFormat:@"auth.test: %@", [json objectForKey:@"error"]]];
+            return;
+        }
+        [_botUserId release];
+        _botUserId = [[[json objectForKey:@"user_id"] description] copy];
+        [self _openSocket:gen];
+    }];
 }
+
+- (void)_openSocket:(NSUInteger)gen {
+    NSDictionary *appAuth = @{@"Authorization": [@"Bearer " stringByAppendingString:_appToken]};
+    [CPTLSClient postJSON:[kSlackAPI stringByAppendingString:@"/apps.connections.open"] headers:appAuth body:@{}
+               completion:^(NSDictionary *json, NSError *error) {
+        if (gen != _generation) return;
+        NSString *url = [json objectForKey:@"url"];
+        if (error || ![[json objectForKey:@"ok"] boolValue] || ![url isKindOfClass:[NSString class]]) {
+            [self _retry:error ? [error localizedDescription] : [NSString stringWithFormat:@"apps.connections.open: %@", [json objectForKey:@"error"]]];
+            return;
+        }
+        _ws = [[OCTLSWebSocket alloc] initWithURL:[NSURL URLWithString:url]];
+        _ws.delegate = self;
+        [_ws open];
+    }];
+}
+
+#pragma mark - Websocket
+
+- (void)webSocketDidOpen:(OCTLSWebSocket *)ws {}
+
+- (void)webSocket:(OCTLSWebSocket *)ws didCloseWithError:(NSError *)error {
+    [self _retry:[error localizedDescription]];
+}
+
+- (void)webSocket:(OCTLSWebSocket *)ws didReceiveText:(NSString *)text {
+    NSDictionary *env = [NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+    if (![env isKindOfClass:[NSDictionary class]]) return;
+    NSString *envelopeId = [env objectForKey:@"envelope_id"];
+    /* slack resends any envelope that is not acknowledged within a few seconds */
+    if ([envelopeId isKindOfClass:[NSString class]]) {
+        NSData *ack = [NSJSONSerialization dataWithJSONObject:@{@"envelope_id": envelopeId} options:0 error:nil];
+        [_ws sendText:[[[NSString alloc] initWithData:ack encoding:NSUTF8StringEncoding] autorelease]];
+    }
+    NSString *type = [env objectForKey:@"type"];
+    if ([type isEqualToString:@"hello"]) {
+        _connected = YES;
+        _backoff = 0;
+        [self _setError:nil];
+    } else if ([type isEqualToString:@"disconnect"]) {
+        _backoff = 0;
+        [self _retry:@"Slack asked for a reconnect"];
+    } else if ([type isEqualToString:@"events_api"]) {
+        NSDictionary *payload = [env objectForKey:@"payload"];
+        NSDictionary *event = [payload isKindOfClass:[NSDictionary class]] ? [payload objectForKey:@"event"] : nil;
+        if ([event isKindOfClass:[NSDictionary class]]) [self _handleEvent:event];
+    }
+}
+
+- (void)_handleEvent:(NSDictionary *)event {
+    NSString *type = [event objectForKey:@"type"];
+    if ([event objectForKey:@"bot_id"] || [event objectForKey:@"subtype"]) return;
+    NSString *user = [[event objectForKey:@"user"] description];
+    if ([user length] == 0 || [user isEqualToString:_botUserId]) return;
+
+    BOOL direct = [[event objectForKey:@"channel_type"] isEqual:@"im"];
+    /* a mention in a channel arrives as app_mention; plain message events are used only for direct messages */
+    if (!([type isEqualToString:@"app_mention"] || ([type isEqualToString:@"message"] && direct))) return;
+
+    NSString *text = [event objectForKey:@"text"];
+    if (![text isKindOfClass:[NSString class]]) return;
+    if (_botUserId) text = [text stringByReplacingOccurrencesOfString:[NSString stringWithFormat:@"<@%@>", _botUserId] withString:@""];
+    text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([text length] == 0) return;
+
+    OCChannelMessage *msg = [[[OCChannelMessage alloc] init] autorelease];
+    msg.channelId = [self channelId];
+    msg.chatId = [[event objectForKey:@"channel"] description];
+    msg.senderId = user;
+    msg.text = text;
+    msg.messageId = [event objectForKey:@"ts"];
+    msg.threadId = [event objectForKey:@"thread_ts"] ?: (direct ? nil : [event objectForKey:@"ts"]);
+    msg.isGroup = !direct;
+    [_messageDelegate channel:self didReceiveMessage:msg];
+}
+
+#pragma mark - Sending
 
 - (void)sendMessage:(NSString *)text toChatId:(NSString *)chatId threadId:(NSString *)threadId {
-    if (_incomingWebhookURL && !chatId) {
-        /* Use webhook */
-        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:
-            [NSURL URLWithString:_incomingWebhookURL]];
-        [req setHTTPMethod:@"POST"];
-        [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-        NSDictionary *body = @{@"text": text};
-        [req setHTTPBody:[NSJSONSerialization dataWithJSONObject:body options:0 error:nil]];
-        [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-            completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {}];
-        return;
+    if ([chatId length] == 0 || [text length] == 0) return;
+    NSDictionary *auth = @{@"Authorization": [@"Bearer " stringByAppendingString:_botToken]};
+    for (NSString *part in OCSplitText(text, kSlackMaxChars)) {
+        NSMutableDictionary *body = [NSMutableDictionary dictionaryWithObjectsAndKeys:chatId, @"channel", part, @"text", nil];
+        if (threadId) [body setObject:threadId forKey:@"thread_ts"];
+        [CPTLSClient postJSON:[kSlackAPI stringByAppendingString:@"/chat.postMessage"] headers:auth body:body
+                   completion:^(NSDictionary *json, NSError *error) {
+            if (error || ![[json objectForKey:@"ok"] boolValue])
+                NSLog(@"[Slack] send failed: %@", error ? [error localizedDescription] : [json objectForKey:@"error"]);
+        }];
     }
-
-    /* Use API */
-    NSString *url = [NSString stringWithFormat:@"%@/chat.postMessage", kSlackAPI];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
-    [req setHTTPMethod:@"POST"];
-    [req setValue:[NSString stringWithFormat:@"Bearer %@", _botToken] forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    NSMutableDictionary *body = [NSMutableDictionary dictionaryWithCapacity:3];
-    [body setObject:chatId ?: @"" forKey:@"channel"];
-    [body setObject:text forKey:@"text"];
-    if (threadId) [body setObject:threadId forKey:@"thread_ts"];
-    [req setHTTPBody:[NSJSONSerialization dataWithJSONObject:body options:0 error:nil]];
-    [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-        completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {}];
 }
 
-- (void)sendReply:(NSString *)text toMessageId:(NSString *)mid chatId:(NSString *)chatId {
-    [self sendMessage:text toChatId:chatId threadId:mid];
+- (NSDictionary *)statusInfo {
+    return @{@"botUserId": _botUserId ?: @"", @"lastError": _lastError ?: @""};
 }
 
-- (void)sendTypingIndicator:(NSString *)chatId { /* Slack doesn't support bot typing */ }
-- (NSDictionary *)statusInfo { return @{@"hasWebhook": @(_incomingWebhookURL != nil)}; }
 @end

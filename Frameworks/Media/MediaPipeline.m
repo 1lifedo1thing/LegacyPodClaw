@@ -3,6 +3,7 @@
  * LegacyPodClaw - Media Processing Implementation
  */
 
+#import "HTTPFetch.h"
 #import "MediaPipeline.h"
 
 #pragma mark - Image Operations
@@ -73,10 +74,9 @@
         @"model_id": _model ?: @"eleven_monolingual_v1"};
     [req setHTTPBody:[NSJSONSerialization dataWithJSONObject:body options:0 error:nil]];
 
-    [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-        completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
+    CPFetchRequest(req, ^(NSData *d, NSInteger status, NSError *e) {
             completion(d, @"mp3", e);
-        }];
+        });
 }
 
 - (void)_synthesizeOpenAI:(NSString *)text
@@ -90,10 +90,9 @@
         @"voice": _voiceId ?: @"alloy", @"response_format": @"mp3"};
     [req setHTTPBody:[NSJSONSerialization dataWithJSONObject:body options:0 error:nil]];
 
-    [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-        completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
+    CPFetchRequest(req, ^(NSData *d, NSInteger status, NSError *e) {
             completion(d, @"mp3", e);
-        }];
+        });
 }
 
 @end
@@ -110,8 +109,7 @@
 
     NSURLRequest *req = [NSURLRequest requestWithURL:url
         cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:15];
-    [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-        completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
+    CPFetchRequest(req, ^(NSData *d, NSInteger status, NSError *e) {
             if (e) { completion(nil, nil, e); return; }
             NSString *html = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] autorelease];
             if (!html) { completion(nil, @"[Binary content]", nil); return; }
@@ -140,7 +138,7 @@
             /* Truncate to 8KB */
             if ([clean length] > 8192) clean = [clean substringToIndex:8192];
             completion(title, clean, nil);
-        }];
+        });
 }
 
 + (void)fetchMetadata:(NSString *)urlString
@@ -148,8 +146,7 @@
     NSURL *url = [NSURL URLWithString:urlString];
     NSURLRequest *req = [NSURLRequest requestWithURL:url
         cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:10];
-    [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-        completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
+    CPFetchRequest(req, ^(NSData *d, NSInteger status, NSError *e) {
             if (e) { completion(nil, e); return; }
             NSString *html = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] autorelease];
             NSMutableDictionary *meta = [NSMutableDictionary dictionary];
@@ -161,7 +158,7 @@
             if (ogDesc) [meta setObject:ogDesc forKey:@"description"];
             if (ogImage) [meta setObject:ogImage forKey:@"image"];
             completion(meta, nil);
-        }];
+        });
 }
 
 + (NSString *)_extractBetween:(NSString *)start and:(NSString *)end from:(NSString *)html {
@@ -226,12 +223,11 @@
         [body appendData:[[NSString stringWithFormat:@"\r\n--%@--\r\n", boundary] dataUsingEncoding:NSUTF8StringEncoding]];
         [req setHTTPBody:body];
 
-        [NSURLConnection sendAsynchronousRequest:req queue:[NSOperationQueue mainQueue]
-            completionHandler:^(NSURLResponse *r, NSData *d, NSError *e) {
+        CPFetchRequest(req, ^(NSData *d, NSInteger status, NSError *e) {
                 if (e) { completion(nil, e); return; }
                 NSDictionary *result = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
                 completion([result objectForKey:@"text"], nil);
-            }];
+            });
     } else {
         completion(nil, [NSError errorWithDomain:@"OCTranscription" code:-1
             userInfo:@{NSLocalizedDescriptionKey: @"Unsupported transcription provider"}]);

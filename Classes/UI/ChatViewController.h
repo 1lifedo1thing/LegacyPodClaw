@@ -13,10 +13,12 @@
 
 #import <UIKit/UIKit.h>
 #import "ChatSession.h"
+#import "Agent.h"
 
 @interface OCChatViewController : UIViewController <UITableViewDataSource,
                                                      UITableViewDelegate,
-                                                     UITextViewDelegate>
+                                                     UITextViewDelegate,
+                                                     OCAgentDelegate>
 
 - (void)updateStatusText:(NSString *)text color:(UIColor *)color;
 - (void)didReceiveMessage:(OCMessage *)message;

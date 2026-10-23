@@ -20,6 +20,8 @@
 @property (nonatomic, retain) NSData *body;
 @property (nonatomic, copy) NSString *remoteAddress;
 @property (nonatomic, assign) uint16_t remotePort;
+// set by the server once the bearer token checks out, before any handler runs
+@property (nonatomic, assign) BOOL authorized;
 
 /* Parsed helpers */
 - (NSString *)headerValue:(NSString *)name;
@@ -49,11 +51,14 @@
 
 typedef void(^OCHTTPHandler)(OCHTTPRequest *request, void(^respond)(OCHTTPResponse *));
 
-/* WebSocket upgrade callback - returns the raw socket for the WS server */
+// pendingData holds bytes that arrived after the upgrade headers, which belong to the first frame
 typedef void(^OCWSUpgradeHandler)(OCHTTPRequest *request,
-                                   CFSocketNativeHandle socket,
                                    NSInputStream *input,
-                                   NSOutputStream *output);
+                                   NSOutputStream *output,
+                                   NSData *pendingData);
+
+// decides whether a request may proceed; runs after the headers and before the body is read
+typedef BOOL(^OCHTTPAuthorizer)(OCHTTPRequest *request);
 
 #pragma mark - HTTP Server
 
@@ -76,11 +81,20 @@ typedef void(^OCWSUpgradeHandler)(OCHTTPRequest *request,
 /* Max concurrent connections (default 32 for memory conservation) */
 @property (nonatomic, assign) NSUInteger maxConnections;
 
-/* Max request body size (default 4MB) */
+// tool calls and chat sends are small json, so 64kb leaves room without letting a client exhaust memory
 @property (nonatomic, assign) NSUInteger maxBodySize;
 
-/* Request timeout (default 30s) */
+// header bytes are buffered before auth runs, so they need their own small cap
+@property (nonatomic, assign) NSUInteger maxHeaderSize;
+
+// covers the handler too, so a stalled tool cannot hold a connection slot forever
 @property (nonatomic, assign) NSTimeInterval requestTimeout;
+
+// the handler gets its own budget once auth passed, because a tool may wait for the user to approve it
+@property (nonatomic, assign) NSTimeInterval handlerTimeout;
+
+// with no authorizer set every non-public route is refused, so a missing setup fails closed
+@property (nonatomic, copy) OCHTTPAuthorizer authorizer;
 
 - (BOOL)start:(NSError **)error;
 - (void)stop;
@@ -89,6 +103,9 @@ typedef void(^OCWSUpgradeHandler)(OCHTTPRequest *request,
 - (void)get:(NSString *)path handler:(OCHTTPHandler)handler;
 - (void)post:(NSString *)path handler:(OCHTTPHandler)handler;
 - (void)route:(NSString *)method path:(NSString *)path handler:(OCHTTPHandler)handler;
+
+// anyone on the lan can reach these, so they must return nothing about the device
+- (void)publicGet:(NSString *)path handler:(OCHTTPHandler)handler;
 
 /* WebSocket upgrade handler */
 - (void)onWebSocketUpgrade:(OCWSUpgradeHandler)handler;

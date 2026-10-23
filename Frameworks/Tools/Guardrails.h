@@ -2,8 +2,8 @@
  * OCGuardrails.h
  * LegacyPodClaw - Safety Guardrails System
  *
- * Prevents the AI from breaking iOS. Validates all filesystem paths,
- * shell commands, and database operations before execution.
+ * Stops file tools from changing system paths or reading secret stores.
+ * Shell commands have no denylist: the user approves each one.
  * All checks are synchronous and cheap (string matching only).
  */
 
@@ -37,20 +37,12 @@ typedef NS_ENUM(NSUInteger, OCFileOp) {
 /* Check a filesystem path before an operation */
 - (OCGuardrailVerdict *)checkPath:(NSString *)path forOperation:(OCFileOp)op;
 
-/* Check a shell command before execution */
-- (OCGuardrailVerdict *)checkCommand:(NSString *)command;
-
-/* Check an SMS database query */
-- (OCGuardrailVerdict *)checkSQLQuery:(NSString *)query onDatabase:(NSString *)dbPath;
-
 /* Check disk space — returns NO if below 50MB free */
 - (BOOL)hasSufficientDiskSpace;
 - (NSUInteger)freeDiskSpaceMB;
 
 /* Rate limiting */
-- (BOOL)allowBashExecution;   /* Max 10/min */
 - (BOOL)allowFileWrite;       /* Max 5/min */
-- (BOOL)allowSMSInsert;       /* Max 1/5sec */
 
 /* Max file write size in bytes (1MB) */
 @property (nonatomic, readonly) NSUInteger maxFileWriteSize;

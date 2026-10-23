@@ -1,0 +1,20 @@
+#!/bin/sh
+# LegacyPodClaw post-removal script; $1 is remove, purge, upgrade and others
+
+case "$1" in
+    remove|purge)
+        # ask cydia to restart springboard, so the removed tweak unloads
+        if [ -n "$CYDIA" ]; then
+            eval "echo 'finish:restart' >&${CYDIA%% *}"
+        fi
+        ;;
+esac
+
+case "$1" in
+    purge)
+        rm -rf /var/mobile/Library/LegacyPodClaw
+        rm -f /var/mobile/Library/Preferences/pro.matthesketh.legacypodclaw.plist
+        ;;
+esac
+
+exit 0

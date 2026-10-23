@@ -8,13 +8,18 @@
 
 #import "HTTPServer.h"
 #import <sys/socket.h>
+#import <sys/stat.h>
 #import <netinet/in.h>
 #import <arpa/inet.h>
+#import <unistd.h>
 
 static const NSUInteger kDefaultMaxConnections = 32;
-static const NSUInteger kDefaultMaxBodySize = 4 * 1024 * 1024;
-static const NSTimeInterval kDefaultRequestTimeout = 30.0;
-static const NSUInteger kReadBufferSize = 4096;
+static const NSUInteger kDefaultMaxBodySize = 64 * 1024;
+static const NSUInteger kDefaultMaxHeaderSize = 8 * 1024;
+static const NSTimeInterval kDefaultRequestTimeout = 15.0;
+enum { kReadBufferSize = 4096 };
+static const NSUInteger kMaxHeaderCount = 64;
+static const unsigned long long kMaxStaticFileSize = 1024 * 1024;
 
 #pragma mark - OCHTTPRequest
 
@@ -40,27 +45,28 @@ static const NSUInteger kReadBufferSize = 4096;
     if (!_query || [_query length] == 0) return @{};
     NSMutableDictionary *params = [NSMutableDictionary dictionary];
     for (NSString *pair in [_query componentsSeparatedByString:@"&"]) {
-        NSArray *kv = [pair componentsSeparatedByString:@"="];
-        if ([kv count] >= 2) {
-            NSString *key = [[kv objectAtIndex:0]
-                stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
-            NSString *val = [[kv objectAtIndex:1]
-                stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
-            if (key && val) [params setObject:val forKey:key];
-        }
+        NSRange eq = [pair rangeOfString:@"="];
+        if (eq.location == NSNotFound) continue;
+        NSString *key = [[pair substringToIndex:eq.location]
+            stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        NSString *val = [[pair substringFromIndex:eq.location + 1]
+            stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
+        if (key && val) [params setObject:val forKey:key];
     }
     return params;
 }
 
 - (NSDictionary *)jsonBody {
     if (!_body || [_body length] == 0) return nil;
-    return [NSJSONSerialization JSONObjectWithData:_body options:0 error:nil];
+    id obj = [NSJSONSerialization JSONObjectWithData:_body options:0 error:nil];
+    return [obj isKindOfClass:[NSDictionary class]] ? obj : nil;
 }
 
 - (NSString *)bearerToken {
     NSString *auth = [self headerValue:@"Authorization"];
-    if (auth && [auth hasPrefix:@"Bearer "]) {
-        return [auth substringFromIndex:7];
+    if ([auth length] > 7 && [[auth substringToIndex:7] caseInsensitiveCompare:@"Bearer "] == NSOrderedSame) {
+        return [[auth substringFromIndex:7]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
     }
     return nil;
 }
@@ -82,8 +88,10 @@ static const NSUInteger kReadBufferSize = 4096;
     if ((self = [super init])) {
         _statusCode = 200;
         _headers = [[NSMutableDictionary alloc] initWithCapacity:4];
-        [_headers setObject:@"LegacyPodClaw/0.3.0" forKey:@"Server"];
+        [_headers setObject:@"LegacyPodClaw" forKey:@"Server"];
         [_headers setObject:@"close" forKey:@"Connection"];
+        [_headers setObject:@"no-store" forKey:@"Cache-Control"];
+        [_headers setObject:@"nosniff" forKey:@"X-Content-Type-Options"];
     }
     return self;
 }
@@ -107,7 +115,11 @@ static const NSUInteger kReadBufferSize = 4096;
     OCHTTPResponse *r = [[[OCHTTPResponse alloc] init] autorelease];
     r.statusCode = status;
     [r.headers setObject:@"application/json" forKey:@"Content-Type"];
-    r.body = [NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
+    NSData *body = nil;
+    if (object && [NSJSONSerialization isValidJSONObject:object]) {
+        body = [NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
+    }
+    r.body = body ?: [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
     return r;
 }
 
@@ -119,7 +131,7 @@ static const NSUInteger kReadBufferSize = 4096;
 }
 
 + (OCHTTPResponse *)errorResponse:(NSInteger)status message:(NSString *)message {
-    return [self jsonResponse:@{@"ok": @NO, @"error": message} status:status];
+    return [self jsonResponse:@{@"ok": @NO, @"error": message ?: @""} status:status];
 }
 
 - (NSData *)serializedHTTPResponse {
@@ -127,10 +139,8 @@ static const NSUInteger kReadBufferSize = 4096;
     NSMutableString *header = [NSMutableString stringWithCapacity:256];
     [header appendFormat:@"HTTP/1.1 %ld %@\r\n", (long)_statusCode, statusText];
 
-    if (_body) {
-        [_headers setObject:[NSString stringWithFormat:@"%lu", (unsigned long)[_body length]]
-                     forKey:@"Content-Length"];
-    }
+    [_headers setObject:[NSString stringWithFormat:@"%lu", (unsigned long)[_body length]]
+                 forKey:@"Content-Length"];
 
     for (NSString *key in _headers) {
         [header appendFormat:@"%@: %@\r\n", key, [_headers objectForKey:key]];
@@ -152,8 +162,12 @@ static const NSUInteger kReadBufferSize = 4096;
         case 403: return @"Forbidden";
         case 404: return @"Not Found";
         case 405: return @"Method Not Allowed";
+        case 408: return @"Request Timeout";
         case 413: return @"Payload Too Large";
+        case 426: return @"Upgrade Required";
+        case 431: return @"Request Header Fields Too Large";
         case 500: return @"Internal Server Error";
+        case 501: return @"Not Implemented";
         case 503: return @"Service Unavailable";
         default:  return @"Unknown";
     }
@@ -169,6 +183,7 @@ static const NSUInteger kReadBufferSize = 4096;
     NSString *path;
     OCHTTPHandler handler;
     BOOL isPrefix; /* path ends with * */
+    BOOL isPublic;
 }
 @end
 
@@ -185,19 +200,29 @@ static const NSUInteger kReadBufferSize = 4096;
     @public
     NSInputStream *inputStream;
     NSOutputStream *outputStream;
-    CFSocketNativeHandle socket;
     NSString *remoteAddress;
     uint16_t remotePort;
 
     NSMutableData *readBuffer;
     BOOL headersParsed;
+    BOOL dispatched;
+    BOOL responded;
+    BOOL closed;
     NSUInteger contentLength;
-    NSUInteger bodyBytesRead;
     OCHTTPRequest *request;
+
+    NSMutableData *writeBuffer;
+    NSUInteger writeOffset;
 
     OCHTTPServer *server; /* weak - not retained */
     NSTimer *timeoutTimer;
 }
+@end
+
+@interface OCHTTPServer ()
+- (void)_readDataFromConnection:(_OCHTTPConnection *)conn;
+- (void)_flushConnection:(_OCHTTPConnection *)conn;
+- (void)_closeConnection:(_OCHTTPConnection *)conn;
 @end
 
 @implementation _OCHTTPConnection
@@ -207,6 +232,7 @@ static const NSUInteger kReadBufferSize = 4096;
     [inputStream close]; [outputStream close];
     [inputStream release]; [outputStream release];
     [remoteAddress release]; [readBuffer release]; [request release];
+    [writeBuffer release];
     [timeoutTimer invalidate];
     [super dealloc];
 }
@@ -214,6 +240,8 @@ static const NSUInteger kReadBufferSize = 4096;
 - (void)stream:(NSStream *)aStream handleEvent:(NSStreamEvent)eventCode {
     if (aStream == inputStream && eventCode == NSStreamEventHasBytesAvailable) {
         [server _readDataFromConnection:self];
+    } else if (aStream == outputStream && eventCode == NSStreamEventHasSpaceAvailable) {
+        [server _flushConnection:self];
     } else if (eventCode == NSStreamEventErrorOccurred || eventCode == NSStreamEventEndEncountered) {
         [server _closeConnection:self];
     }
@@ -237,6 +265,28 @@ static const NSUInteger kReadBufferSize = 4096;
 static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
                                         CFDataRef address, const void *data, void *info);
 
+static void OCSetNoSigPipe(int fd) {
+    int on = 1;
+    // a peer that resets mid-write would otherwise kill the whole app with sigpipe
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+}
+
+static BOOL OCIsTokenChar(unichar c) {
+    if (c >= 'A' && c <= 'Z') return YES;
+    if (c >= 'a' && c <= 'z') return YES;
+    if (c >= '0' && c <= '9') return YES;
+    return [@"!#$%&'*+-.^_`|~" rangeOfString:[NSString stringWithCharacters:&c length:1]].location != NSNotFound;
+}
+
+static BOOL OCIsToken(NSString *s) {
+    NSUInteger len = [s length];
+    if (len == 0) return NO;
+    for (NSUInteger i = 0; i < len; i++) {
+        if (!OCIsTokenChar([s characterAtIndex:i])) return NO;
+    }
+    return YES;
+}
+
 @implementation OCHTTPServer
 
 - (instancetype)init {
@@ -245,7 +295,9 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
         _bindAddress = [@"0.0.0.0" retain];
         _maxConnections = kDefaultMaxConnections;
         _maxBodySize = kDefaultMaxBodySize;
+        _maxHeaderSize = kDefaultMaxHeaderSize;
         _requestTimeout = kDefaultRequestTimeout;
+        _handlerTimeout = kDefaultRequestTimeout;
         _routes = [[NSMutableArray alloc] initWithCapacity:16];
         _connections = [[NSMutableSet alloc] initWithCapacity:16];
     }
@@ -256,6 +308,7 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
     [self stop];
     [_bindAddress release]; [_routes release]; [_connections release];
     [_wsUpgradeHandler release]; [_staticDir release]; [_staticURLPath release];
+    [_authorizer release];
     [super dealloc];
 }
 
@@ -278,18 +331,27 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
     /* Allow address reuse */
     int yes = 1;
     setsockopt(CFSocketGetNative(_listenSocket), SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    OCSetNoSigPipe(CFSocketGetNative(_listenSocket));
 
     /* Bind */
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
+    addr.sin_len = sizeof(addr);
     addr.sin_family = AF_INET;
     addr.sin_port = htons(_port);
-    addr.sin_addr.s_addr = inet_addr([_bindAddress UTF8String]);
+    if (inet_pton(AF_INET, [_bindAddress UTF8String], &addr.sin_addr) != 1) {
+        CFSocketInvalidate(_listenSocket);
+        CFRelease(_listenSocket); _listenSocket = NULL;
+        if (error) *error = [NSError errorWithDomain:@"OCHTTPServer" code:-3
+                                            userInfo:@{NSLocalizedDescriptionKey: @"Invalid bind address"}];
+        return NO;
+    }
 
     NSData *addrData = [NSData dataWithBytes:&addr length:sizeof(addr)];
     CFSocketError sockErr = CFSocketSetAddress(_listenSocket, (__bridge CFDataRef)addrData);
 
     if (sockErr != kCFSocketSuccess) {
+        CFSocketInvalidate(_listenSocket);
         CFRelease(_listenSocket); _listenSocket = NULL;
         if (error) *error = [NSError errorWithDomain:@"OCHTTPServer" code:-2
                                             userInfo:@{NSLocalizedDescriptionKey:
@@ -347,11 +409,22 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
 }
 
 - (void)route:(NSString *)method path:(NSString *)path handler:(OCHTTPHandler)handler {
+    [self _addRoute:method path:path handler:handler isPublic:NO];
+}
+
+- (void)publicGet:(NSString *)path handler:(OCHTTPHandler)handler {
+    // prefix matches would let a public route shadow private ones
+    NSString *exact = [path hasSuffix:@"*"] ? [path substringToIndex:[path length] - 1] : path;
+    [self _addRoute:@"GET" path:exact handler:handler isPublic:YES];
+}
+
+- (void)_addRoute:(NSString *)method path:(NSString *)path handler:(OCHTTPHandler)handler isPublic:(BOOL)isPublic {
     _OCRouteEntry *entry = [[_OCRouteEntry alloc] init];
     entry->method = [method retain];
-    entry->isPrefix = [path hasSuffix:@"*"];
-    entry->path = [entry->isPrefix ? [path substringToIndex:[path length] - 1] : path retain];
+    entry->isPrefix = !isPublic && [path hasSuffix:@"*"];
+    entry->path = [(entry->isPrefix ? [path substringToIndex:[path length] - 1] : path) retain];
     entry->handler = [handler copy];
+    entry->isPublic = isPublic;
     [_routes addObject:entry];
     [entry release];
 }
@@ -362,28 +435,43 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
 }
 
 - (void)serveStaticFiles:(NSString *)directory atPath:(NSString *)urlPath {
-    [_staticDir release]; _staticDir = [directory copy];
+    [_staticDir release];
+    _staticDir = [[[directory stringByStandardizingPath] stringByResolvingSymlinksInPath] copy];
     [_staticURLPath release]; _staticURLPath = [urlPath copy];
+}
+
+- (_OCRouteEntry *)_routeForRequest:(OCHTTPRequest *)req {
+    for (_OCRouteEntry *route in _routes) {
+        if (![route->method isEqualToString:req.method]) continue;
+        BOOL match = route->isPrefix ? [req.path hasPrefix:route->path]
+                                     : [req.path isEqualToString:route->path];
+        if (match) return route;
+    }
+    return nil;
 }
 
 #pragma mark - Accept
 
 - (void)_acceptConnection:(CFSocketNativeHandle)nativeSocket {
-    if ([_connections count] >= _maxConnections) {
+    if (!_isRunning || [_connections count] >= _maxConnections) {
         close(nativeSocket);
         return;
     }
 
+    OCSetNoSigPipe(nativeSocket);
+
     /* Get remote address */
     struct sockaddr_in peerAddr;
     socklen_t peerLen = sizeof(peerAddr);
-    getpeername(nativeSocket, (struct sockaddr *)&peerAddr, &peerLen);
-    char addrBuf[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &peerAddr.sin_addr, addrBuf, sizeof(addrBuf));
+    memset(&peerAddr, 0, sizeof(peerAddr));
+    char addrBuf[INET_ADDRSTRLEN] = "unknown";
+    if (getpeername(nativeSocket, (struct sockaddr *)&peerAddr, &peerLen) == 0) {
+        inet_ntop(AF_INET, &peerAddr.sin_addr, addrBuf, sizeof(addrBuf));
+    }
 
     /* Create streams */
-    CFReadStreamRef readStream;
-    CFWriteStreamRef writeStream;
+    CFReadStreamRef readStream = NULL;
+    CFWriteStreamRef writeStream = NULL;
     CFStreamCreatePairWithSocket(kCFAllocatorDefault, nativeSocket, &readStream, &writeStream);
 
     if (!readStream || !writeStream) {
@@ -393,18 +481,17 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
         return;
     }
 
-    /* Prevent socket close when streams released */
+    // the streams own the descriptor from here, so closing them releases it
     CFReadStreamSetProperty(readStream, kCFStreamPropertyShouldCloseNativeSocket, kCFBooleanTrue);
     CFWriteStreamSetProperty(writeStream, kCFStreamPropertyShouldCloseNativeSocket, kCFBooleanTrue);
 
     _OCHTTPConnection *conn = [[_OCHTTPConnection alloc] init];
     conn->inputStream = (NSInputStream *)readStream;
     conn->outputStream = (NSOutputStream *)writeStream;
-    conn->socket = nativeSocket;
     conn->remoteAddress = [[NSString stringWithUTF8String:addrBuf] retain];
     conn->remotePort = ntohs(peerAddr.sin_port);
     conn->readBuffer = [[NSMutableData alloc] initWithCapacity:kReadBufferSize];
-    conn->headersParsed = NO;
+    conn->writeBuffer = [[NSMutableData alloc] init];
     conn->server = self;
 
     [conn->inputStream setDelegate:conn];
@@ -414,7 +501,6 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
     [conn->inputStream open];
     [conn->outputStream open];
 
-    /* Timeout */
     conn->timeoutTimer = [NSTimer scheduledTimerWithTimeInterval:_requestTimeout
                                                           target:self
                                                         selector:@selector(_connectionTimeout:)
@@ -428,51 +514,75 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
 #pragma mark - Read/Parse
 
 - (void)_readDataFromConnection:(_OCHTTPConnection *)conn {
-    uint8_t buf[4096];
-    while ([conn->inputStream hasBytesAvailable]) {
-        NSInteger bytesRead = [conn->inputStream read:buf maxLength:kReadBufferSize];
-        if (bytesRead <= 0) break;
-        [conn->readBuffer appendBytes:buf length:bytesRead];
-    }
+    // closing or upgrading drops the set's reference while this loop still uses conn
+    [[conn retain] autorelease];
+    uint8_t buf[kReadBufferSize];
+    while (!conn->closed && [conn->inputStream hasBytesAvailable]) {
+        NSInteger bytesRead = [conn->inputStream read:buf maxLength:sizeof(buf)];
+        if (bytesRead < 0) { [self _closeConnection:conn]; return; }
+        if (bytesRead == 0) break;
+        // once a request is dispatched the rest of the input is ignored, not buffered
+        if (conn->dispatched || conn->responded) continue;
+        [conn->readBuffer appendBytes:buf length:(NSUInteger)bytesRead];
 
-    if (!conn->headersParsed) {
-        [self _tryParseHeaders:conn];
-    } else if (conn->contentLength > 0) {
-        [self _tryReadBody:conn];
+        if (!conn->headersParsed) {
+            [self _tryParseHeaders:conn];
+        } else {
+            [self _tryReadBody:conn];
+        }
     }
+}
+
+- (void)_reject:(_OCHTTPConnection *)conn status:(NSInteger)status message:(NSString *)message {
+    OCHTTPResponse *resp = [OCHTTPResponse errorResponse:status message:message];
+    if (status == 401) [resp.headers setObject:@"Bearer" forKey:@"WWW-Authenticate"];
+    [self _sendResponse:resp toConnection:conn];
 }
 
 - (void)_tryParseHeaders:(_OCHTTPConnection *)conn {
     const uint8_t *bytes = [conn->readBuffer bytes];
     NSUInteger length = [conn->readBuffer length];
 
-    /* Find \r\n\r\n */
     NSUInteger headerEnd = 0;
-    for (NSUInteger i = 0; i + 3 < length; i++) {
+    NSUInteger scanLimit = MIN(length, _maxHeaderSize);
+    for (NSUInteger i = 0; i + 3 < scanLimit; i++) {
         if (bytes[i] == '\r' && bytes[i+1] == '\n' && bytes[i+2] == '\r' && bytes[i+3] == '\n') {
             headerEnd = i + 4;
             break;
         }
     }
-    if (headerEnd == 0) return; /* Headers not complete yet */
+    if (headerEnd == 0) {
+        if (length >= _maxHeaderSize) [self _reject:conn status:431 message:@"Headers too large"];
+        return;
+    }
 
-    NSString *headerStr = [[NSString alloc] initWithBytes:bytes length:headerEnd encoding:NSUTF8StringEncoding];
+    // latin-1 maps every byte, so odd header bytes cannot make the decode fail
+    NSString *headerStr = [[[NSString alloc] initWithBytes:bytes length:headerEnd - 4
+                                                  encoding:NSISOLatin1StringEncoding] autorelease];
     NSArray *lines = [headerStr componentsSeparatedByString:@"\r\n"];
-    [headerStr release];
+    if ([lines count] < 1 || [lines count] > kMaxHeaderCount + 1) {
+        [self _reject:conn status:400 message:@"Bad request"];
+        return;
+    }
 
-    if ([lines count] < 1) { [self _closeConnection:conn]; return; }
-
-    /* Parse request line */
     NSArray *parts = [[lines objectAtIndex:0] componentsSeparatedByString:@" "];
-    if ([parts count] < 2) { [self _closeConnection:conn]; return; }
+    if ([parts count] != 3) { [self _reject:conn status:400 message:@"Bad request line"]; return; }
+    NSString *method = [parts objectAtIndex:0];
+    NSString *uri = [parts objectAtIndex:1];
+    NSString *version = [parts objectAtIndex:2];
+    if (!OCIsToken(method) || ![uri hasPrefix:@"/"] ||
+        !([version isEqualToString:@"HTTP/1.1"] || [version isEqualToString:@"HTTP/1.0"])) {
+        [self _reject:conn status:400 message:@"Bad request line"];
+        return;
+    }
 
     OCHTTPRequest *req = [[OCHTTPRequest alloc] init];
-    req.method = [parts objectAtIndex:0];
+    conn->request = req;
+    conn->headersParsed = YES;
+    req.method = method;
     req.remoteAddress = conn->remoteAddress;
     req.remotePort = conn->remotePort;
 
-    /* Parse path and query */
-    NSString *uri = [parts objectAtIndex:1];
     NSRange qRange = [uri rangeOfString:@"?"];
     if (qRange.location != NSNotFound) {
         req.path = [uri substringToIndex:qRange.location];
@@ -481,108 +591,149 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
         req.path = uri;
     }
 
-    /* Parse headers */
     NSMutableDictionary *hdrs = [NSMutableDictionary dictionaryWithCapacity:8];
+    NSCharacterSet *ws = [NSCharacterSet whitespaceCharacterSet];
     for (NSUInteger i = 1; i < [lines count]; i++) {
         NSString *line = [lines objectAtIndex:i];
-        if ([line length] == 0) break;
-        NSRange colonRange = [line rangeOfString:@": "];
-        if (colonRange.location != NSNotFound) {
-            NSString *key = [line substringToIndex:colonRange.location];
-            NSString *val = [line substringFromIndex:colonRange.location + 2];
-            [hdrs setObject:val forKey:key];
+        NSRange colon = [line rangeOfString:@":"];
+        if (colon.location == NSNotFound) { [self _reject:conn status:400 message:@"Bad header"]; return; }
+        NSString *key = [line substringToIndex:colon.location];
+        if (!OCIsToken(key)) { [self _reject:conn status:400 message:@"Bad header"]; return; }
+        NSString *val = [[line substringFromIndex:colon.location + 1] stringByTrimmingCharactersInSet:ws];
+        // duplicates of these are how smuggling and auth confusion start
+        if ([req headerValue:key] && ([key caseInsensitiveCompare:@"Content-Length"] == NSOrderedSame ||
+                                      [key caseInsensitiveCompare:@"Authorization"] == NSOrderedSame ||
+                                      [key caseInsensitiveCompare:@"Host"] == NSOrderedSame)) {
+            [self _reject:conn status:400 message:@"Duplicate header"];
+            return;
         }
+        [hdrs setObject:val forKey:key];
+        req.headers = hdrs;
     }
     req.headers = hdrs;
 
-    conn->request = req;
-    conn->headersParsed = YES;
-
-    /* Content-Length */
-    NSString *clStr = [req headerValue:@"Content-Length"];
-    conn->contentLength = clStr ? [clStr integerValue] : 0;
-
-    if (conn->contentLength > _maxBodySize) {
-        [self _sendResponse:[OCHTTPResponse errorResponse:413 message:@"Payload too large"]
-               toConnection:conn];
+    if ([req headerValue:@"Transfer-Encoding"]) {
+        [self _reject:conn status:501 message:@"Transfer-Encoding not supported"];
         return;
     }
 
-    /* Remove headers from buffer, keep body data */
+    NSString *clStr = [req headerValue:@"Content-Length"];
+    unsigned long long cl = 0;
+    if (clStr) {
+        NSScanner *sc = [NSScanner scannerWithString:clStr];
+        if ([clStr length] == 0 || [clStr length] > 12 ||
+            [clStr rangeOfCharacterFromSet:[[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location != NSNotFound ||
+            ![sc scanUnsignedLongLong:&cl]) {
+            [self _reject:conn status:400 message:@"Bad Content-Length"];
+            return;
+        }
+    }
+
+    // auth runs before the body is read, so an unauthenticated client cannot make us buffer anything
+    BOOL isUpgrade = [req isWebSocketUpgrade];
+    _OCRouteEntry *route = isUpgrade ? nil : [self _routeForRequest:req];
+    BOOL isPublic = route && route->isPublic;
+    BOOL hasAuthHeader = [req headerValue:@"Authorization"] != nil;
+    req.authorized = (_authorizer && hasAuthHeader) ? _authorizer(req) : NO;
+
+    if (isUpgrade) {
+        // browsers cannot set headers on a websocket, so a missing header defers auth to the connect frame
+        if (hasAuthHeader && !req.authorized) { [self _reject:conn status:401 message:@"Unauthorized"]; return; }
+        if (![req.method isEqualToString:@"GET"] || cl > 0) {
+            [self _reject:conn status:400 message:@"Bad upgrade"];
+            return;
+        }
+    } else if (!isPublic && !req.authorized) {
+        [self _reject:conn status:401 message:@"Unauthorized"];
+        return;
+    } else if (!req.authorized && cl > 0) {
+        [self _reject:conn status:400 message:@"Unexpected body"];
+        return;
+    }
+
+    if (cl > _maxBodySize) {
+        [self _reject:conn status:413 message:@"Payload too large"];
+        return;
+    }
+    conn->contentLength = (NSUInteger)cl;
+
     NSData *remaining = nil;
     if (headerEnd < length) {
         remaining = [NSData dataWithBytes:bytes + headerEnd length:length - headerEnd];
     }
     [conn->readBuffer setLength:0];
     if (remaining) [conn->readBuffer appendData:remaining];
-    conn->bodyBytesRead = [conn->readBuffer length];
 
-    if (conn->contentLength == 0 || conn->bodyBytesRead >= conn->contentLength) {
-        req.body = conn->contentLength > 0 ? [[conn->readBuffer copy] autorelease] : nil;
-        [self _dispatchRequest:conn];
+    if (isUpgrade) {
+        [self _dispatchUpgrade:conn];
+        return;
     }
+    [self _tryReadBody:conn];
 }
 
 - (void)_tryReadBody:(_OCHTTPConnection *)conn {
-    conn->bodyBytesRead = [conn->readBuffer length];
-    if (conn->bodyBytesRead >= conn->contentLength) {
-        conn->request.body = [[conn->readBuffer subdataWithRange:
-            NSMakeRange(0, conn->contentLength)] retain];
-        [self _dispatchRequest:conn];
-    }
+    if (conn->dispatched || conn->responded) return;
+    if ([conn->readBuffer length] < conn->contentLength) return;
+    conn->request.body = conn->contentLength > 0
+        ? [conn->readBuffer subdataWithRange:NSMakeRange(0, conn->contentLength)]
+        : nil;
+    [conn->readBuffer setLength:0];
+    [self _dispatchRequest:conn];
 }
 
 #pragma mark - Dispatch
 
-- (void)_dispatchRequest:(_OCHTTPConnection *)conn {
-    [conn->timeoutTimer invalidate];
-    conn->timeoutTimer = nil;
-
-    OCHTTPRequest *req = conn->request;
-
-    /* WebSocket upgrade? */
-    if ([req isWebSocketUpgrade] && _wsUpgradeHandler) {
-        /* Remove streams from runloop - WS server takes over */
-        [conn->inputStream removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        [conn->outputStream removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        [conn->inputStream setDelegate:nil];
-        [conn->outputStream setDelegate:nil];
-
-        _wsUpgradeHandler(req, conn->socket, conn->inputStream, conn->outputStream);
-
-        /* Don't close - WS server owns the socket now */
-        conn->inputStream = nil;
-        conn->outputStream = nil;
-        [_connections removeObject:conn];
+- (void)_dispatchUpgrade:(_OCHTTPConnection *)conn {
+    conn->dispatched = YES;
+    if (!_wsUpgradeHandler) {
+        [self _reject:conn status:404 message:@"Not found"];
         return;
     }
 
-    /* Match route */
-    for (_OCRouteEntry *route in _routes) {
-        if (![route->method isEqualToString:req.method]) continue;
+    [conn->timeoutTimer invalidate];
+    conn->timeoutTimer = nil;
+    [conn->inputStream removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    [conn->outputStream removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    [conn->inputStream setDelegate:nil];
+    [conn->outputStream setDelegate:nil];
 
-        BOOL match = NO;
-        if (route->isPrefix) {
-            match = [req.path hasPrefix:route->path];
-        } else {
-            match = [req.path isEqualToString:route->path];
-        }
+    // ownership of the streams moves to the websocket layer
+    NSInputStream *input = [conn->inputStream autorelease];
+    NSOutputStream *output = [conn->outputStream autorelease];
+    conn->inputStream = nil;
+    conn->outputStream = nil;
+    NSData *pending = [[conn->readBuffer copy] autorelease];
+    OCHTTPRequest *req = [[conn->request retain] autorelease];
+    conn->closed = YES;
+    [_connections removeObject:conn];
 
-        if (match) {
-            route->handler(req, ^(OCHTTPResponse *response) {
-                [self _sendResponse:response toConnection:conn];
-            });
-            return;
-        }
+    _wsUpgradeHandler(req, input, output, pending);
+}
+
+- (void)_dispatchRequest:(_OCHTTPConnection *)conn {
+    conn->dispatched = YES;
+    OCHTTPRequest *req = conn->request;
+
+    _OCRouteEntry *route = [self _routeForRequest:req];
+    if (route) {
+        [conn->timeoutTimer invalidate];
+        conn->timeoutTimer = [NSTimer scheduledTimerWithTimeInterval:_handlerTimeout
+                                                              target:self
+                                                            selector:@selector(_connectionTimeout:)
+                                                            userInfo:conn
+                                                             repeats:NO];
+        route->handler(req, ^(OCHTTPResponse *response) {
+            [self _sendResponse:response toConnection:conn];
+        });
+        return;
     }
 
-    /* Static files? */
-    if (_staticDir && _staticURLPath && [req.path hasPrefix:_staticURLPath]) {
+    if (_staticDir && _staticURLPath && [req.method isEqualToString:@"GET"] &&
+        [req.path hasPrefix:_staticURLPath]) {
         [self _serveStaticFile:req connection:conn];
         return;
     }
 
-    /* 404 */
     [self _sendResponse:[OCHTTPResponse errorResponse:404 message:@"Not found"] toConnection:conn];
 }
 
@@ -591,12 +742,29 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
     if ([relativePath length] == 0 || [relativePath isEqualToString:@"/"]) {
         relativePath = @"/index.html";
     }
-    NSString *filePath = [_staticDir stringByAppendingPathComponent:relativePath];
-
-    /* Security: prevent path traversal */
-    NSString *resolved = [filePath stringByStandardizingPath];
-    if (![resolved hasPrefix:[_staticDir stringByStandardizingPath]]) {
+    if ([relativePath rangeOfString:@".."].location != NSNotFound ||
+        [relativePath rangeOfString:@"\\"].location != NSNotFound ||
+        [relativePath rangeOfString:@"%"].location != NSNotFound) {
         [self _sendResponse:[OCHTTPResponse errorResponse:403 message:@"Forbidden"] toConnection:conn];
+        return;
+    }
+
+    // resolve symlinks and compare against the directory plus a slash, so a sibling like static-old cannot match
+    NSString *resolved = [[[_staticDir stringByAppendingPathComponent:relativePath]
+        stringByStandardizingPath] stringByResolvingSymlinksInPath];
+    NSString *base = [_staticDir hasSuffix:@"/"] ? _staticDir : [_staticDir stringByAppendingString:@"/"];
+    if (![resolved hasPrefix:base]) {
+        [self _sendResponse:[OCHTTPResponse errorResponse:403 message:@"Forbidden"] toConnection:conn];
+        return;
+    }
+
+    struct stat st;
+    if (stat([resolved fileSystemRepresentation], &st) != 0 || !S_ISREG(st.st_mode)) {
+        [self _sendResponse:[OCHTTPResponse errorResponse:404 message:@"Not found"] toConnection:conn];
+        return;
+    }
+    if ((unsigned long long)st.st_size > kMaxStaticFileSize) {
+        [self _sendResponse:[OCHTTPResponse errorResponse:413 message:@"File too large"] toConnection:conn];
         return;
     }
 
@@ -609,7 +777,6 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
     OCHTTPResponse *resp = [OCHTTPResponse responseWithStatus:200];
     resp.body = fileData;
 
-    /* Content type from extension */
     NSString *ext = [[resolved pathExtension] lowercaseString];
     NSString *ct = @"application/octet-stream";
     if ([ext isEqualToString:@"html"]) ct = @"text/html; charset=utf-8";
@@ -626,32 +793,58 @@ static void OCHTTPServerAcceptCallback(CFSocketRef s, CFSocketCallBackType type,
 #pragma mark - Response
 
 - (void)_sendResponse:(OCHTTPResponse *)response toConnection:(_OCHTTPConnection *)conn {
-    NSData *data = [response serializedHTTPResponse];
-    if (conn->outputStream && [conn->outputStream hasSpaceAvailable]) {
-        [conn->outputStream write:[data bytes] maxLength:[data length]];
+    // handlers may answer late or twice; only the first answer on a live connection counts
+    if (conn->responded || conn->closed || !response) return;
+    conn->responded = YES;
+    [conn->writeBuffer appendData:[response serializedHTTPResponse]];
+    [self _flushConnection:conn];
+}
+
+- (void)_flushConnection:(_OCHTTPConnection *)conn {
+    if (conn->closed || !conn->responded) return;
+    [[conn retain] autorelease];
+    while (conn->writeOffset < [conn->writeBuffer length] && [conn->outputStream hasSpaceAvailable]) {
+        const uint8_t *p = (const uint8_t *)[conn->writeBuffer bytes] + conn->writeOffset;
+        NSInteger n = [conn->outputStream write:p maxLength:[conn->writeBuffer length] - conn->writeOffset];
+        if (n < 0) { [self _closeConnection:conn]; return; }
+        if (n == 0) break;
+        conn->writeOffset += (NSUInteger)n;
     }
-    /* Close after response (HTTP/1.0 style for simplicity on constrained device) */
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
-                   dispatch_get_main_queue(), ^{
+    if (conn->writeOffset >= [conn->writeBuffer length]) {
         [self _closeConnection:conn];
-    });
+    }
 }
 
 #pragma mark - Connection Management
 
 - (void)_closeConnection:(_OCHTTPConnection *)conn {
+    if (conn->closed) return;
+    conn->closed = YES;
+    [[conn retain] autorelease];
     [conn->timeoutTimer invalidate];
     conn->timeoutTimer = nil;
     [conn->inputStream setDelegate:nil];
     [conn->outputStream setDelegate:nil];
+    [conn->inputStream removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    [conn->outputStream removeFromRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     [conn->inputStream close];
     [conn->outputStream close];
     [_connections removeObject:conn];
 }
 
 - (void)_connectionTimeout:(NSTimer *)timer {
-    _OCHTTPConnection *conn = [timer userInfo];
+    _OCHTTPConnection *conn = [[[timer userInfo] retain] autorelease];
+    conn->timeoutTimer = nil;
+    if (conn->closed) return;
+    if (conn->responded) {
+        [self _closeConnection:conn];
+        return;
+    }
     [self _sendResponse:[OCHTTPResponse errorResponse:408 message:@"Request timeout"] toConnection:conn];
+    // a peer that never reads must not keep the slot after the timeout either
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        [self _closeConnection:conn];
+    });
 }
 
 - (NSUInteger)activeConnections {
